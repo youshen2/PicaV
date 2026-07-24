@@ -1,0 +1,380 @@
+name: Build unsigned IPA
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-unsigned-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  select_run:
+    name: Avoid duplicate branch and tag builds
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.decision.outputs.should_build }}
+
+    steps:
+      - name: Checkout branch push
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Select build run
+        id: decision
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SHOULD_BUILD=true
+          if [[ "${GITHUB_EVENT_NAME}" == "push" && "${GITHUB_REF}" == "refs/heads/main" ]]; then
+            MATCHING_TAG="$(git tag --points-at "${GITHUB_SHA}" --list 'v*')"
+            if [[ -n "${MATCHING_TAG}" ]]; then
+              SHOULD_BUILD=false
+              echo "Skipping branch build because ${GITHUB_SHA} is tagged with ${MATCHING_TAG}."
+            fi
+          fi
+
+          echo "should_build=${SHOULD_BUILD}" >> "${GITHUB_OUTPUT}"
+
+  build:
+    name: Build unsigned IPA
+    needs: select_run
+    if: needs.select_run.outputs.should_build == 'true'
+    runs-on: macos-26
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Select Xcode
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for xcode_app in /Applications/Xcode_26.5.app /Applications/Xcode.app; do
+            if [[ -d "${xcode_app}" ]]; then
+              sudo xcode-select -s "${xcode_app}/Contents/Developer"
+              break
+            fi
+          done
+
+          xcodebuild -version
+          xcodebuild -showsdks
+
+      - name: Build unsigned IPA
+        run: bash build_unsigned_ipa.sh
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: PicaV-iOS-unsigned-${{ github.run_number }}
+          path: build/PicaV-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Generate release body
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          TAG_NAME="${GITHUB_REF_NAME}"
+          RELEASE_TAGS="$(
+            gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+              --jq '.[] | select(.draft == false) | .tag_name'
+          )"
+          PREVIOUS_TAG="$(
+            awk -v current="${TAG_NAME}" '$0 != current { print; exit }' <<< "${RELEASE_TAGS}"
+          )"
+
+          append_release_commits() {
+            awk '
+              !/^[[:space:]]*\[X\]/ {
+                print "- " $0
+                found = 1
+              }
+              END {
+                if (!found) {
+                  print "- 本次没有需要公开展示的提交记录。"
+                }
+              }
+            '
+          }
+
+          if [[ -n "${PREVIOUS_TAG}" ]]; then
+            git log "${PREVIOUS_TAG}..${TAG_NAME}" --pretty=format:"%s" \
+              | append_release_commits > release_commits.txt
+          else
+            : > release_commits.txt
+          fi
+
+          cat > release_body.md <<EOF
+          这是由 GitHub Actions 自动构建的 PicaV 发行版本。
+
+          ## 下载
+
+          请在下方 Assets 中下载 \`PicaV-unsigned.ipa\`。
+
+          ## 安装
+
+          IPA 未签名，不能像 App Store 应用一样直接安装；请自行签名后再安装到 iPhone 或 iPad。
+
+          ## 版本信息
+
+          - 版本：\`${TAG_NAME}\`
+          - Commit：\`${GITHUB_SHA}\`
+          - 构建编号：\`${GITHUB_RUN_NUMBER}\`
+          EOF
+
+          if [[ -n "${PREVIOUS_TAG}" ]]; then
+            {
+              echo
+              echo "## 更新内容"
+              echo
+              echo "从 \`${PREVIOUS_TAG}\` 到 \`${TAG_NAME}\` 的提交："
+              echo
+              cat release_commits.txt
+            } >> release_body.md
+          fi
+
+          {
+            echo
+            echo
+            echo "---"
+            echo
+            echo "由 GitHub Actions 自动发布。"
+          } >> release_body.md
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: PicaV ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          body_path: release_body.md
+          draft: false
+          prerelease: false
+          files: build/PicaV-unsigned.ipa
+
+      - name: Upload release metadata
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-artifact@v4
+        with:
+          name: PicaV-release-metadata-${{ github.run_number }}
+          path: release_commits.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  telegram:
+    name: Send IPA to Telegram channel
+    needs:
+      - select_run
+      - build
+    if: >-
+      needs.select_run.outputs.should_build == 'true' &&
+      needs.build.result == 'success' &&
+      !startsWith(github.ref, 'refs/tags/') &&
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+
+    steps:
+      - name: Checkout commit history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download unsigned IPA
+        uses: actions/download-artifact@v4
+        with:
+          name: PicaV-iOS-unsigned-${{ github.run_number }}
+          path: telegram-assets
+
+      - name: Generate commit summary
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TARGET_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          FALLBACK_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+
+          python3 .github/scripts/ci_commit_summary.py \
+            --current-sha "${TARGET_SHA}" \
+            --current-run-id "${GITHUB_RUN_ID}" \
+            --current-run-number "${GITHUB_RUN_NUMBER}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --workflow "build-unsigned.yml" \
+            --fallback-sha "${FALLBACK_SHA}" \
+            --run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --output "${RUNNER_TEMP}/telegram-caption.txt"
+
+      - name: Send commit summary and IPA to Telegram
+        shell: bash
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${TELEGRAM_BOT_TOKEN}" ]]; then
+            echo "::error::缺少 Actions Secret：TELEGRAM_BOT_TOKEN"
+            exit 1
+          fi
+
+          if [[ -z "${TELEGRAM_CHAT_ID}" ]]; then
+            echo "::error::缺少 Actions Secret：TELEGRAM_CHAT_ID"
+            exit 1
+          fi
+
+          IPA_PATH="telegram-assets/PicaV-unsigned.ipa"
+          CAPTION_PATH="${RUNNER_TEMP}/telegram-caption.txt"
+          if [[ ! -f "${IPA_PATH}" || ! -f "${CAPTION_PATH}" ]]; then
+            echo "::error::找不到 IPA 或 CI Caption"
+            exit 1
+          fi
+
+          RESPONSE_FILE="${RUNNER_TEMP}/telegram-ipa-response.json"
+          if ! curl \
+              --fail-with-body \
+              --silent \
+              --show-error \
+              --connect-timeout 15 \
+              --max-time 600 \
+              --request POST \
+              "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument" \
+              --form-string "chat_id=${TELEGRAM_CHAT_ID}" \
+              --form "document=@${IPA_PATH};type=application/octet-stream" \
+              --form-string "caption=$(< "${CAPTION_PATH}")" \
+              --output "${RESPONSE_FILE}"; then
+            echo "::error::发送 Telegram IPA 失败"
+            exit 1
+          fi
+
+          echo "CI Caption 和 IPA 已发送到 Telegram 频道。"
+
+  telegram_release:
+    name: Send and pin Telegram release
+    needs:
+      - select_run
+      - build
+    if: >-
+      needs.select_run.outputs.should_build == 'true' &&
+      startsWith(github.ref, 'refs/tags/') &&
+      needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download unsigned IPA
+        uses: actions/download-artifact@v4
+        with:
+          name: PicaV-iOS-unsigned-${{ github.run_number }}
+          path: telegram-assets
+
+      - name: Download release metadata
+        uses: actions/download-artifact@v4
+        with:
+          name: PicaV-release-metadata-${{ github.run_number }}
+          path: release-metadata
+
+      - name: Generate Telegram release caption
+        shell: bash
+        env:
+          RELEASE_URL: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          python3 .github/scripts/release_telegram_caption.py \
+            --project "PicaV" \
+            --version "${GITHUB_REF_NAME}" \
+            --details-file "release-metadata/release_commits.txt" \
+            --release-url "${RELEASE_URL}" \
+            --output "${RUNNER_TEMP}/telegram-release-caption.txt"
+
+      - name: Send and pin Telegram release
+        shell: bash
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${TELEGRAM_BOT_TOKEN}" || -z "${TELEGRAM_CHAT_ID}" ]]; then
+            echo "::error::缺少 TELEGRAM_BOT_TOKEN 或 TELEGRAM_CHAT_ID"
+            exit 1
+          fi
+
+          IPA_PATH="telegram-assets/PicaV-unsigned.ipa"
+          CAPTION_PATH="${RUNNER_TEMP}/telegram-release-caption.txt"
+          if [[ ! -f "${IPA_PATH}" || ! -f "${CAPTION_PATH}" ]]; then
+            echo "::error::找不到 Release IPA 或 Caption"
+            exit 1
+          fi
+
+          RESPONSE_FILE="${RUNNER_TEMP}/telegram-release-response.json"
+          if ! curl \
+              --fail-with-body \
+              --silent \
+              --show-error \
+              --connect-timeout 15 \
+              --max-time 600 \
+              --request POST \
+              "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument" \
+              --form-string "chat_id=${TELEGRAM_CHAT_ID}" \
+              --form-string "disable_notification=false" \
+              --form "document=@${IPA_PATH};type=application/octet-stream" \
+              --form-string "caption=$(< "${CAPTION_PATH}")" \
+              --output "${RESPONSE_FILE}"; then
+            echo "::error::发送 Telegram Release 失败"
+            exit 1
+          fi
+
+          MESSAGE_ID="$(
+            python3 -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["result"]["message_id"])' \
+              "${RESPONSE_FILE}"
+          )"
+
+          if ! curl \
+              --fail-with-body \
+              --silent \
+              --show-error \
+              --connect-timeout 15 \
+              --max-time 60 \
+              --request POST \
+              "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/pinChatMessage" \
+              --form-string "chat_id=${TELEGRAM_CHAT_ID}" \
+              --form-string "message_id=${MESSAGE_ID}" \
+              --form-string "disable_notification=false" \
+              > /dev/null; then
+            echo "::error::Release 已发送，但置顶或通知失败"
+            exit 1
+          fi
+
+          echo "Telegram Release 已发送、置顶并通知频道成员。"
