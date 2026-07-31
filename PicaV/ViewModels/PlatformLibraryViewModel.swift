@@ -18,6 +18,7 @@ final class PlatformLibraryViewModel: ObservableObject {
     @Published private(set) var historyState: LoadState = .idle
     @Published private(set) var favorites: [Anime] = []
     @Published private(set) var history: [Anime] = []
+    @Published private var loadMoreErrors: [LibrarySection: String] = [:]
 
     init(client: AnimeAPIClient) {
         self.client = client
@@ -35,20 +36,37 @@ final class PlatformLibraryViewModel: ObservableObject {
         _ section: LibrarySection,
         force: Bool = false
     ) async {
-        guard state(for: section) != .loading else { return }
         if !force, state(for: section) == .loaded { return }
 
+        let requestID = UUID()
+        activeLoadRequestIDs[section] = requestID
+        invalidateLoadMore(section)
         setState(.loading, for: section)
         do {
             let page = try await fetch(section, page: 1)
-            guard !Task.isCancelled else { return }
-            setItems(page.items, for: section)
+            guard !Task.isCancelled,
+                  activeLoadRequestIDs[section] == requestID else {
+                restoreStateAfterCancellation(
+                    section,
+                    requestID: requestID
+                )
+                return
+            }
+            setItems(page.items.stableUniqued(id: \.id), for: section)
             setPage(1, hasMore: page.hasMore, for: section)
+            loadMoreErrors[section] = nil
             setState(.loaded, for: section)
         } catch is CancellationError {
-            return
+            restoreStateAfterCancellation(section, requestID: requestID)
         } catch {
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled,
+                  activeLoadRequestIDs[section] == requestID else {
+                restoreStateAfterCancellation(
+                    section,
+                    requestID: requestID
+                )
+                return
+            }
             setState(.failed(error.localizedDescription), for: section)
         }
     }
@@ -58,26 +76,57 @@ final class PlatformLibraryViewModel: ObservableObject {
         currentItem: Anime
     ) async {
         let items = items(for: section)
-        guard currentItem.id == items.last?.id,
+        guard state(for: section) == .loaded,
+              currentItem.id == items.last?.id,
               hasMore(for: section),
               !isLoadingMore(for: section) else {
             return
         }
 
+        let requestID = UUID()
+        activeLoadMoreRequestIDs[section] = requestID
         setIsLoadingMore(true, for: section)
-        defer { setIsLoadingMore(false, for: section) }
+        loadMoreErrors[section] = nil
+        defer {
+            if activeLoadMoreRequestIDs[section] == requestID {
+                setIsLoadingMore(false, for: section)
+            }
+        }
         do {
             let nextPage = page(for: section) + 1
             let result = try await fetch(section, page: nextPage)
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled,
+                  activeLoadMoreRequestIDs[section] == requestID else {
+                return
+            }
             appendUnique(result.items, for: section)
-            setPage(nextPage, hasMore: result.hasMore, for: section)
-        } catch {
+            setPage(result.page, hasMore: result.hasMore, for: section)
+        } catch is CancellationError {
             return
+        } catch {
+            guard activeLoadMoreRequestIDs[section] == requestID else {
+                return
+            }
+            loadMoreErrors[section] = error.localizedDescription
         }
     }
 
+    func retryLoadMore(_ section: LibrarySection) async {
+        guard let item = items(for: section).last else { return }
+        await loadMoreIfNeeded(section, currentItem: item)
+    }
+
+    func loadMoreError(for section: LibrarySection) -> String? {
+        loadMoreErrors[section]
+    }
+
+    func isLoadingMore(_ section: LibrarySection) -> Bool {
+        isLoadingMore(for: section)
+    }
+
     func reset() {
+        activeLoadRequestIDs.removeAll()
+        activeLoadMoreRequestIDs.removeAll()
         favoriteState = .idle
         historyState = .idle
         favorites = []
@@ -86,6 +135,9 @@ final class PlatformLibraryViewModel: ObservableObject {
         historyPage = 0
         favoriteHasMore = false
         historyHasMore = false
+        isLoadingMoreFavorites = false
+        isLoadingMoreHistory = false
+        loadMoreErrors.removeAll()
     }
 
     private func fetch(
@@ -124,8 +176,10 @@ final class PlatformLibraryViewModel: ObservableObject {
         _ newItems: [Anime],
         for section: LibrarySection
     ) {
-        var knownIDs = Set(items(for: section).map(\.id))
-        let uniqueItems = newItems.filter { knownIDs.insert($0.id).inserted }
+        let uniqueItems = newItems.stableUniqued(
+            seededBy: Set(items(for: section).map(\.id)),
+            id: \.id
+        )
         switch section {
         case .favorites: favorites.append(contentsOf: uniqueItems)
         case .history: history.append(contentsOf: uniqueItems)
@@ -171,6 +225,20 @@ final class PlatformLibraryViewModel: ObservableObject {
         }
     }
 
+    private func restoreStateAfterCancellation(
+        _ section: LibrarySection,
+        requestID: UUID
+    ) {
+        guard activeLoadRequestIDs[section] == requestID else { return }
+        setState(items(for: section).isEmpty ? .idle : .loaded, for: section)
+    }
+
+    private func invalidateLoadMore(_ section: LibrarySection) {
+        activeLoadMoreRequestIDs[section] = nil
+        setIsLoadingMore(false, for: section)
+        loadMoreErrors[section] = nil
+    }
+
     private let client: AnimeAPIClient
     private let pageSize = 50
     private var favoritePage = 0
@@ -179,4 +247,6 @@ final class PlatformLibraryViewModel: ObservableObject {
     private var historyHasMore = false
     private var isLoadingMoreFavorites = false
     private var isLoadingMoreHistory = false
+    private var activeLoadRequestIDs: [LibrarySection: UUID] = [:]
+    private var activeLoadMoreRequestIDs: [LibrarySection: UUID] = [:]
 }

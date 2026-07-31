@@ -31,6 +31,7 @@ struct CommunityVideoPlayerView: View {
                     resumeTime: 0,
                     isActive: isVisible && coordinator.activePostID == postID,
                     onProgress: { _, _ in },
+                    onPlaybackEnded: {},
                     onSourceChange: { _ in }
                 )
             } else {

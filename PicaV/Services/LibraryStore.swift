@@ -6,20 +6,51 @@ final class LibraryStore: ObservableObject {
     @Published private(set) var favorites: [Anime]
     @Published private(set) var history: [WatchHistoryEntry]
 
-    init(defaults: UserDefaults = .standard) {
+    init(
+        platformID: AnimePlatformID = AnimePlatformRegistry.defaultID,
+        defaults: UserDefaults = .standard
+    ) {
         self.defaults = defaults
-        let loadedFavorites = Self.decode(
-            [Anime].self,
-            from: defaults.data(forKey: Keys.favorites)
-        ) ?? []
-        let loadedHistory = Self.decode(
-            [WatchHistoryEntry].self,
-            from: defaults.data(forKey: Keys.history)
-        ) ?? []
-        favorites = loadedFavorites
-        history = loadedHistory.map { entry in
+        currentPlatformID = platformID
+        persistence = LibraryPersistence(defaults: defaults)
+        let loaded = Self.load(
+            platformID: platformID,
+            defaults: defaults
+        )
+        favorites = loaded.favorites
+        history = Self.mergedHistory(
+            loaded.history,
+            favorites: loaded.favorites
+        )
+        if history != loaded.history {
+            defaults.set(
+                try? JSONEncoder().encode(history),
+                forKey: Keys.history(for: platformID)
+            )
+        }
+    }
+
+    func selectPlatform(_ platformID: AnimePlatformID) {
+        guard platformID != currentPlatformID else { return }
+        currentPlatformID = platformID
+        let loaded = Self.load(
+            platformID: platformID,
+            defaults: defaults
+        )
+        favorites = loaded.favorites
+        history = Self.mergedHistory(
+            loaded.history,
+            favorites: loaded.favorites
+        )
+    }
+
+    private static func mergedHistory(
+        _ history: [WatchHistoryEntry],
+        favorites: [Anime]
+    ) -> [WatchHistoryEntry] {
+        history.map { entry in
             guard entry.anime.coverURL == nil || entry.anime.bannerURL == nil,
-                  let favorite = loadedFavorites.first(where: {
+                  let favorite = favorites.first(where: {
                       $0.id == entry.anime.id
                   }) else {
                 return entry
@@ -29,12 +60,6 @@ final class LibraryStore: ObservableObject {
                     newValue: entry.anime,
                     previousValue: favorite
                 )
-            )
-        }
-        if history != loadedHistory {
-            defaults.set(
-                try? JSONEncoder().encode(history),
-                forKey: Keys.history
             )
         }
     }
@@ -183,11 +208,31 @@ final class LibraryStore: ObservableObject {
     }
 
     private func saveFavorites() {
-        defaults.set(try? JSONEncoder().encode(favorites), forKey: Keys.favorites)
+        persistenceRevision += 1
+        let revision = persistenceRevision
+        let values = favorites
+        let key = Keys.favorites(for: currentPlatformID)
+        Task {
+            await persistence.save(
+                values,
+                forKey: key,
+                revision: revision
+            )
+        }
     }
 
     private func saveHistory() {
-        defaults.set(try? JSONEncoder().encode(history), forKey: Keys.history)
+        persistenceRevision += 1
+        let revision = persistenceRevision
+        let values = history
+        let key = Keys.history(for: currentPlatformID)
+        Task {
+            await persistence.save(
+                values,
+                forKey: key,
+                revision: revision
+            )
+        }
     }
 
     private static func decode<T: Decodable>(_ type: T.Type, from data: Data?) -> T? {
@@ -195,14 +240,85 @@ final class LibraryStore: ObservableObject {
         return try? JSONDecoder().decode(type, from: data)
     }
 
+    private static func load(
+        platformID: AnimePlatformID,
+        defaults: UserDefaults
+    ) -> (
+        favorites: [Anime],
+        history: [WatchHistoryEntry]
+    ) {
+        let favoritesKey = Keys.favorites(for: platformID)
+        let historyKey = Keys.history(for: platformID)
+        let canMigrateLegacy = platformID == AnimePlatformRegistry.defaultID
+        let favoritesData = defaults.data(forKey: favoritesKey)
+            ?? (
+                canMigrateLegacy
+                    ? defaults.data(forKey: Keys.legacyFavorites)
+                    : nil
+            )
+        let historyData = defaults.data(forKey: historyKey)
+            ?? (
+                canMigrateLegacy
+                    ? defaults.data(forKey: Keys.legacyHistory)
+                    : nil
+            )
+        let favorites = decode([Anime].self, from: favoritesData) ?? []
+        let history = decode(
+            [WatchHistoryEntry].self,
+            from: historyData
+        ) ?? []
+        if defaults.data(forKey: favoritesKey) == nil,
+           favoritesData != nil {
+            defaults.set(favoritesData, forKey: favoritesKey)
+        }
+        if defaults.data(forKey: historyKey) == nil,
+           historyData != nil {
+            defaults.set(historyData, forKey: historyKey)
+        }
+        return (favorites, history)
+    }
+
     private let defaults: UserDefaults
+    private let persistence: LibraryPersistence
+    private var currentPlatformID: AnimePlatformID
+    private var persistenceRevision = 0
     private var refreshingArtworkPlatforms = Set<AnimePlatformID>()
     private var refreshedArtworkPlatforms = Set<AnimePlatformID>()
 
     private enum Keys {
-        static let favorites = "library.favorites"
-        static let history = "library.history"
+        static let legacyFavorites = "library.favorites"
+        static let legacyHistory = "library.history"
+
+        static func favorites(for platformID: AnimePlatformID) -> String {
+            "\(legacyFavorites).\(platformID.rawValue)"
+        }
+
+        static func history(for platformID: AnimePlatformID) -> String {
+            "\(legacyHistory).\(platformID.rawValue)"
+        }
     }
+}
+
+private actor LibraryPersistence {
+    init(defaults: UserDefaults) {
+        self.defaults = defaults
+    }
+
+    func save<Value: Encodable>(
+        _ value: Value,
+        forKey key: String,
+        revision: Int
+    ) {
+        guard revision >= (latestRevisions[key] ?? 0),
+              let data = try? JSONEncoder().encode(value) else {
+            return
+        }
+        latestRevisions[key] = revision
+        defaults.set(data, forKey: key)
+    }
+
+    private let defaults: UserDefaults
+    private var latestRevisions: [String: Int] = [:]
 }
 
 private extension WatchHistoryEntry {

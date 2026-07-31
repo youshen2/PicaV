@@ -45,10 +45,6 @@ struct LibraryPage: View {
                 await library.refreshHistoryArtwork(using: client)
             }
         }
-        .onAppear {
-            guard usesPlatformData else { return }
-            Task { await viewModel.load(selection, force: true) }
-        }
         .onChange(of: settings.platformID) { _ in
             viewModel.reset()
         }
@@ -107,6 +103,8 @@ struct LibraryPage: View {
                 }
             }
             .padding()
+
+            loadMoreStatus(.favorites)
         }
         .refreshable {
             await viewModel.load(.favorites, force: true)
@@ -129,10 +127,27 @@ struct LibraryPage: View {
                     }
                 }
             }
+
+            loadMoreStatus(.history)
         }
         .listStyle(.insetGrouped)
         .refreshable {
             await viewModel.load(.history, force: true)
+        }
+    }
+
+    @ViewBuilder
+    private func loadMoreStatus(_ section: LibrarySection) -> some View {
+        if viewModel.isLoadingMore(section) {
+            ProgressView()
+                .frame(maxWidth: .infinity)
+                .padding()
+        } else if viewModel.loadMoreError(for: section) != nil {
+            Button("重试加载更多") {
+                Task { await viewModel.retryLoadMore(section) }
+            }
+            .frame(maxWidth: .infinity)
+            .padding()
         }
     }
 

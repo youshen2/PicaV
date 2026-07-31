@@ -1,5 +1,4 @@
 import Combine
-import CommonCrypto
 import CryptoKit
 import Foundation
 
@@ -74,11 +73,6 @@ enum AnimeAPIError: LocalizedError {
     }
 }
 
-private struct ServerPayload {
-    let value: Any
-    let domain: String?
-}
-
 @MainActor
 final class AnimeAPIClient: ObservableObject {
     var platformID: AnimePlatformID { settings.platformID }
@@ -136,6 +130,12 @@ final class AnimeAPIClient: ObservableObject {
     var preferredCDNID: String? {
         settings.preferredCDNID.isEmpty ? nil : settings.preferredCDNID
     }
+    var autoplayNextEpisode: Bool {
+        settings.autoplayNextEpisode
+    }
+    var downloadOverCellular: Bool {
+        settings.downloadOverCellular
+    }
     var detailCacheScope: String {
         let account = settings.accountSession.map {
             $0.userID ?? $0.account
@@ -161,488 +161,12 @@ final class AnimeAPIClient: ObservableObject {
         }
     }
 
-    func fetchHomeSections(
-        channel: PlatformHomeChannel
-    ) async throws -> [AnimeHomeSection] {
-        if let request = settings.activePlatform.homeSectionsRequest(
-            channel: channel
-        ) {
-            let payload = try await perform(request)
-            return AnimeMapper.homeSections(
-                from: payload.value,
-                domain: imageDomain(for: payload),
-                baseURL: settings.rootURL,
-                contentKindHint: channel.contentKindHint
-            )
-        }
-
-        guard let categoriesRequest = settings.activePlatform
-            .homeCatalogCategoriesRequest(channel: channel) else {
-            return []
-        }
-        let categoriesPayload = try await perform(categoriesRequest)
-        let categories = AnimeMapper.categories(
-            from: categoriesPayload.value,
-            domain: imageDomain(for: categoriesPayload),
-            baseURL: settings.rootURL
-        )
-        guard let categoryID = categories.first?.id,
-              let catalogRequest = settings.activePlatform.homeCatalogRequest(
-                  channel: channel,
-                  categoryID: categoryID,
-                  pageSize: 20
-              ) else {
-            return []
-        }
-        let catalogPayload = try await perform(catalogRequest)
-        let items = AnimeMapper.animeList(
-            from: catalogPayload.value,
-            domain: imageDomain(for: catalogPayload),
-            baseURL: settings.rootURL,
-            contentKindHint: channel.contentKindHint
-        )
-        guard !items.isEmpty else { return [] }
-        return [
-            AnimeHomeSection(
-                id: "catalog-\(channel.id)-\(categoryID)",
-                title: channel.contentKindHint == .video
-                    ? "最新视频"
-                    : "新番速递",
-                subtitle: categories.first?.title,
-                layout: channel.contentKindHint == .video
-                    ? .landscape
-                    : .portrait,
-                items: items
-            )
-        ]
-    }
-
-    func fetchHomeSectionMore(
-        section: AnimeHomeSection,
-        page: Int,
-        pageSize: Int = 20,
-        sortType: Int
-    ) async throws -> AnimePage {
-        guard let actions = section.actions,
-              let request = settings.activePlatform.homeSectionMoreRequest(
-                  sectionID: actions.sectionID,
-                  page: page,
-                  pageSize: pageSize,
-                  sortType: sortType
-              ) else {
-            throw AnimeAPIError.homeSectionActionUnavailable
-        }
-        let payload = try await perform(request)
-        let items = AnimeMapper.animeList(
-            from: payload.value,
-            domain: imageDomain(for: payload),
-            baseURL: settings.rootURL,
-            contentKindHint: section.items.first?.contentKind
-        )
-        let total = AnimeMapper.totalCount(from: payload.value)
-        return AnimePage(
-            items: items,
-            page: page,
-            hasMore: total.map { page * pageSize < $0 }
-                ?? (items.count >= pageSize)
-        )
-    }
-
-    func fetchHomeSectionReplacement(
-        section: AnimeHomeSection
-    ) async throws -> [Anime] {
-        guard let actions = section.actions,
-              let lastItemID = section.items.last?.id,
-              let request = settings.activePlatform.homeSectionChangeRequest(
-                  sectionID: actions.sectionID,
-                  lastItemID: lastItemID,
-                  pageSize: actions.changePageSize
-              ) else {
-            throw AnimeAPIError.homeSectionActionUnavailable
-        }
-        let payload = try await perform(request)
-        return AnimeMapper.animeList(
-            from: payload.value,
-            domain: imageDomain(for: payload),
-            baseURL: settings.rootURL,
-            contentKindHint: section.items.first?.contentKind
-        )
-    }
-
-    func fetchCategories() async throws -> [AnimeCategory] {
-        let payload = try await perform(settings.activePlatform.categoriesRequest())
-        return AnimeMapper.categories(
-            from: payload.value,
-            domain: imageDomain(for: payload),
-            baseURL: settings.rootURL
-        )
-    }
-
-    func fetchAnime(
-        categoryID: String?,
-        page: Int,
-        pageSize: Int = 10,
-        sort: AnimeSort
-    ) async throws -> AnimePage {
-        let specification = settings.activePlatform.catalogRequest(
-            categoryID: categoryID,
-            page: page,
-            pageSize: pageSize,
-            sort: sort
-        )
-        let payload = try await perform(specification)
-        let items = AnimeMapper.animeList(
-            from: payload.value,
-            domain: imageDomain(for: payload),
-            baseURL: settings.rootURL
-        )
-        let total = AnimeMapper.totalCount(from: payload.value)
-        return AnimePage(
-            items: items,
-            page: page,
-            hasMore: total.map { page * pageSize < $0 } ?? (items.count >= pageSize)
-        )
-    }
-
-    func search(
-        query searchWord: String,
-        page: Int,
-        pageSize: Int = 20
-    ) async throws -> AnimePage {
-        let specification = settings.activePlatform.searchRequest(
-            query: searchWord,
-            page: page,
-            pageSize: pageSize
-        )
-        let payload = try await perform(specification)
-        let items = AnimeMapper.animeList(
-            from: payload.value,
-            domain: imageDomain(for: payload),
-            baseURL: settings.rootURL
-        )
-        let total = AnimeMapper.totalCount(from: payload.value)
-        return AnimePage(
-            items: items,
-            page: page,
-            hasMore: total.map { page * pageSize < $0 } ?? (items.count >= pageSize)
-        )
-    }
-
-    func fetchSearchHotWords() async throws -> [String] {
-        guard let request = settings.activePlatform.searchHotWordsRequest() else {
-            return []
-        }
-        let payload = try await perform(request)
-        return AnimeMapper.searchHotWords(from: payload.value)
-    }
-
-    func fetchPlatformFavorites(
-        page: Int = 1,
-        pageSize: Int = 50
-    ) async throws -> AnimePage {
-        try requirePlatformLibraryAccountIfNeeded()
-        guard let request = settings.activePlatform.favoritesRequest(
-            page: page,
-            pageSize: pageSize
-        ) else {
-            throw AnimeAPIError.platformLibraryUnavailable
-        }
-        let payload = try await perform(request)
-        let items = AnimeMapper.animeList(
-            from: payload.value,
-            domain: imageDomain(for: payload),
-            baseURL: settings.rootURL
-        )
-        let total = AnimeMapper.totalCount(from: payload.value)
-        return AnimePage(
-            items: items,
-            page: page,
-            hasMore: total.map { page * pageSize < $0 }
-                ?? (items.count >= pageSize)
-        )
-    }
-
-    func fetchPlatformHistory(
-        page: Int = 1,
-        pageSize: Int = 50
-    ) async throws -> AnimePage {
-        try requirePlatformLibraryAccountIfNeeded()
-        guard let request = settings.activePlatform.historyRequest(
-            page: page,
-            pageSize: pageSize
-        ) else {
-            throw AnimeAPIError.platformLibraryUnavailable
-        }
-        let payload = try await perform(request)
-        let items = AnimeMapper.animeList(
-            from: payload.value,
-            domain: imageDomain(for: payload),
-            baseURL: settings.rootURL
-        )
-        let total = AnimeMapper.totalCount(from: payload.value)
-        return AnimePage(
-            items: items,
-            page: page,
-            hasMore: total.map { page * pageSize < $0 }
-                ?? (items.count >= pageSize)
-        )
-    }
-
-    func setPlatformFavorite(
-        itemID: String,
-        isFavorite: Bool
-    ) async throws {
-        try requirePlatformLibraryAccountIfNeeded()
-        guard let request = settings.activePlatform.setFavoriteRequest(
-            itemID: itemID,
-            isFavorite: isFavorite
-        ) else {
-            throw AnimeAPIError.platformLibraryUnavailable
-        }
-        _ = try await perform(request)
-    }
-
-    func fetchCreatorProfile(userID: String) async throws -> AnimeUploader {
-        guard let request = settings.activePlatform.creatorProfileRequest(
-            userID: userID
-        ) else {
-            throw AnimeAPIError.creatorUnavailable
-        }
-        let payload = try await perform(request)
-        guard let uploader = AnimeMapper.uploader(
-            from: payload.value,
-            domain: imageDomain(for: payload),
-            baseURL: settings.rootURL,
-            fallbackID: userID
-        ) else {
-            throw AnimeAPIError.invalidPayload
-        }
-        return uploader
-    }
-
-    func setCreatorFollowing(
-        userID: String,
-        isFollowing: Bool
-    ) async throws {
-        if creatorFollowingRequiresAccount, !settings.isAccountLoggedIn {
-            throw AnimeAPIError.platformAccountRequired
-        }
-        guard let request = settings.activePlatform.setCreatorFollowingRequest(
-            userID: userID,
-            isFollowing: isFollowing
-        ) else {
-            throw AnimeAPIError.creatorUnavailable
-        }
-        _ = try await perform(request)
-    }
-
-    func fetchDetail(videoID: String, fallbackAnime: Anime? = nil) async throws -> AnimeDetail {
-        let contentKind = fallbackAnime?.contentKind ?? .anime
-        let payload = try await perform(
-            settings.activePlatform.detailRequest(
-                itemID: videoID,
-                contentKind: contentKind
-            )
-        )
-        return try AnimeMapper.detail(
-            from: payload.value,
-            domain: imageDomain(for: payload),
-            baseURL: settings.rootURL,
-            fallbackAnime: fallbackAnime
-        )
-    }
-
-    func fetchRecommendations(
-        videoID: String,
-        contentKind: AnimeContentKind = .anime
-    ) async throws -> [Anime] {
-        let payload = try await perform(
-            settings.activePlatform.recommendationsRequest(
-                itemID: videoID,
-                contentKind: contentKind
-            )
-        )
-        return AnimeMapper.animeList(
-            from: payload.value,
-            domain: imageDomain(for: payload),
-            baseURL: settings.rootURL
-        )
-    }
-
-    func fetchComments(
-        videoID: String,
-        page: Int = 1,
-        pageSize: Int = 100,
-        parentID: String? = nil
-    ) async throws -> [AnimeComment] {
-        guard let request = settings.activePlatform.commentsRequest(
-            videoID: videoID,
-            page: page,
-            pageSize: pageSize,
-            parentID: parentID
-        ) else {
-            throw AnimeAPIError.commentsUnavailable
-        }
-        let payload = try await perform(request)
-        return AnimeMapper.comments(
-            from: payload.value,
-            domain: imageDomain(for: payload),
-            baseURL: settings.rootURL
-        )
-    }
-
-    func postComment(
-        videoID: String,
-        content rawContent: String,
-        parentID: String? = nil,
-        topID: String? = nil
-    ) async throws {
-        let content = rawContent.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !content.isEmpty,
-              let request = settings.activePlatform.postCommentRequest(
-                  videoID: videoID,
-                  content: content,
-                  parentID: parentID,
-                  topID: topID
-              ) else {
-            throw AnimeAPIError.commentPostingUnavailable
-        }
-        _ = try await perform(request)
-    }
-
-    func fetchCommunityFeed(
-        scope: CommunityFeedScope,
-        sort: CommunityFeedSort,
-        page: Int,
-        pageSize: Int = 10
-    ) async throws -> CommunityFeedPage {
-        guard let request = settings.activePlatform.communityFeedRequest(
-            scope: scope,
-            sort: sort,
-            page: page,
-            pageSize: pageSize
-        ) else {
-            throw AnimeAPIError.communityUnavailable
-        }
-        let payload = try await perform(request)
-        let items = CommunityMapper.posts(
-            from: payload.value,
-            domain: imageDomain(for: payload),
-            baseURL: settings.rootURL
-        )
-        let total = AnimeMapper.totalCount(from: payload.value)
-        return CommunityFeedPage(
-            items: items,
-            page: page,
-            hasMore: total.map { page * pageSize < $0 } ?? (items.count >= pageSize)
-        )
-    }
-
-    func fetchCommunityPost(postID: String) async throws -> CommunityPost {
-        guard let request = settings.activePlatform.communityDetailRequest(
-            postID: postID
-        ) else {
-            throw AnimeAPIError.communityUnavailable
-        }
-        let payload = try await perform(request)
-        guard let post = CommunityMapper.post(
-            from: payload.value,
-            domain: imageDomain(for: payload),
-            baseURL: settings.rootURL
-        ) else {
-            throw AnimeAPIError.invalidCommunityPayload
-        }
-        return post
-    }
-
-    func setCommunityPostLiked(postID: String, liked: Bool) async throws {
-        guard let request = settings.activePlatform.communityLikeRequest(
-            postID: postID,
-            liked: liked
-        ) else {
-            throw AnimeAPIError.communityInteractionUnavailable
-        }
-        _ = try await perform(request)
-    }
-
-    func fetchCommunityComments(
-        postID: String,
-        page: Int = 1,
-        pageSize: Int = 100,
-        parentID: String? = nil
-    ) async throws -> [AnimeComment] {
-        guard let request = settings.activePlatform.communityCommentsRequest(
-            postID: postID,
-            page: page,
-            pageSize: pageSize,
-            parentID: parentID
-        ) else {
-            throw AnimeAPIError.communityInteractionUnavailable
-        }
-        let payload = try await perform(request)
-        return AnimeMapper.comments(
-            from: payload.value,
-            domain: imageDomain(for: payload),
-            baseURL: settings.rootURL
-        )
-    }
-
-    func postCommunityComment(
-        postID: String,
-        content rawContent: String,
-        parentID: String? = nil,
-        topID: String? = nil
-    ) async throws {
-        let content = rawContent.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !content.isEmpty,
-              let request = settings.activePlatform.postCommunityCommentRequest(
-                  postID: postID,
-                  content: content,
-                  parentID: parentID,
-                  topID: topID
-              ) else {
-            throw AnimeAPIError.communityInteractionUnavailable
-        }
-        _ = try await perform(request)
-    }
-
-    func fetchCommunityTopics() async throws -> [CommunityTopic] {
-        guard let request = settings.activePlatform.communityTopicsRequest() else {
-            throw AnimeAPIError.communityPublishingUnavailable
-        }
-        let payload = try await perform(request)
-        return CommunityMapper.topics(from: payload.value)
-    }
-
-    func publishCommunityPost(
-        content rawContent: String,
-        topics: [CommunityTopic]
-    ) async throws {
-        let content = rawContent.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !content.isEmpty, !topics.isEmpty,
-              let request = settings.activePlatform.publishCommunityPostRequest(
-                  content: content,
-                  topics: topics
-              ) else {
-            throw AnimeAPIError.communityPublishingUnavailable
-        }
-        _ = try await perform(request)
-    }
-
-    func communityPlaybackURL(for video: CommunityVideo) throws -> URL {
-        guard !video.isLocked,
-              let request = settings.activePlatform.communityVideoPlaybackRequest(
-                  videoPath: video.path
-              ),
-              let url = endpointURL(path: request.path, query: request.query) else {
-            throw AnimeAPIError.playbackUnavailable
-        }
-        return url
-    }
-
     func fetchCDNLines() async throws -> [CDNLine] {
         let payload = try await perform(settings.activePlatform.cdnLinesRequest())
-        return AnimeMapper.cdnLines(from: payload.value)
+        let value = payload.value
+        return try await mapPayload {
+            AnimeMapper.cdnLines(from: value)
+        }
     }
 
     @discardableResult
@@ -749,13 +273,13 @@ final class AnimeAPIClient: ObservableObject {
         settings.preferredCDNID = id
     }
 
-    private func requirePlatformLibraryAccountIfNeeded() throws {
+    func requirePlatformLibraryAccountIfNeeded() throws {
         guard !platformLibraryRequiresAccount || settings.isAccountLoggedIn else {
             throw AnimeAPIError.platformAccountRequired
         }
     }
 
-    private func perform(_ specification: PlatformRequest) async throws -> ServerPayload {
+    func perform(_ specification: PlatformRequest) async throws -> ServerPayload {
         do {
             let payload = try await send(specification)
             rememberImageDomain(from: payload)
@@ -813,90 +337,67 @@ final class AnimeAPIClient: ObservableObject {
             }
         }
 
+        let decryptionToken = settings.effectiveAccessToken
         let (data, response) = try await session.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse else {
             throw AnimeAPIError.invalidResponse
         }
-
-        let parsedObject = try? JSONSerialization.jsonObject(with: data)
-        let parsedRoot = parsedObject as? JSONObject
-        guard (200...299).contains(httpResponse.statusCode) else {
-            throw AnimeAPIError.httpStatus(
-                httpResponse.statusCode,
-                message: parsedRoot?.string(for: ["msg", "message", "error"])
-            )
-        }
-        guard let root = parsedRoot else {
-            throw AnimeAPIError.invalidResponse
-        }
-        return try parsePayload(root, travelerKey: travelerKey, timestamp: timestamp)
-    }
-
-    private func parsePayload(
-        _ root: JSONObject,
-        travelerKey: String?,
-        timestamp: String
-    ) throws -> ServerPayload {
-        if let code = root.integer(for: ["code", "status"]), code != 0, code != 200 {
-            throw AnimeAPIError.server(
-                code: code,
-                message: root.string(for: ["msg", "message", "error"]) ?? "请求失败（\(code)）"
-            )
-        }
-
-        let dataObject = root.object(for: ["data", "result"])
-        let rootDomain = root.string(for: ["domain", "imgDomain", "imageDomain"])
-            ?? dataObject?.string(for: ["domain", "imgDomain", "imageDomain"])
-
-        if let travelerKey,
-           let encrypted = root.string(for: ["data"]) {
-            let value = try AcFanAuthenticationCrypto.decryptTravelerResponse(
-                encrypted,
-                travelerKey: travelerKey,
-                timestamp: timestamp
-            )
-            return normalizedPayload(value, fallbackDomain: rootDomain)
-        }
-
-        let encrypted = root.string(for: ["encData"]) ?? dataObject?.string(for: ["encData"])
-        if let encrypted {
-            return normalizedPayload(
-                try decryptJSON(encrypted),
-                fallbackDomain: rootDomain
-            )
-        }
-        return ServerPayload(
-            value: root.value(for: ["data", "result"]) ?? root,
-            domain: rootDomain
+        return try await AnimeResponseParser.parse(
+            data: data,
+            statusCode: httpResponse.statusCode,
+            travelerKey: travelerKey,
+            timestamp: timestamp,
+            accessToken: decryptionToken
         )
     }
 
     private func ensureAuthenticated() async throws {
         let platform = settings.activePlatform
-        guard platform.requiresGuestSession, settings.effectiveAccessToken.isEmpty else { return }
+        guard platform.requiresGuestSession,
+              settings.effectiveAccessToken.isEmpty else {
+            return
+        }
+        let scope = guestSessionScope
 
-        if let guestLoginTask {
-            let token = try await guestLoginTask.value
+        if let entry = guestLoginTask, entry.scope == scope {
+            let token = try await entry.task.value
+            try Task.checkCancellation()
+            guard guestSessionScope == scope else {
+                throw CancellationError()
+            }
             settings.setGuestToken(token)
             return
         }
+        guestLoginTask?.task.cancel()
 
+        let taskID = UUID()
         let task = Task<String, Error> { [weak self] in
             guard let self else { throw AnimeAPIError.authenticationFailed }
-            return try await self.createGuestSession()
+            return try await self.createGuestSession(scope: scope)
         }
-        guestLoginTask = task
+        guestLoginTask = GuestLoginTaskEntry(
+            id: taskID,
+            scope: scope,
+            task: task
+        )
         do {
             let token = try await task.value
+            try Task.checkCancellation()
+            guard guestSessionScope == scope else {
+                throw CancellationError()
+            }
             settings.setGuestToken(token)
-            guestLoginTask = nil
+            clearGuestLoginTask(id: taskID)
         } catch {
-            guestLoginTask = nil
+            clearGuestLoginTask(id: taskID)
             throw error
         }
     }
 
-    private func createGuestSession() async throws -> String {
+    private func createGuestSession(scope: String) async throws -> String {
+        guard guestSessionScope == scope else {
+            throw CancellationError()
+        }
         guard let authentication = settings.activePlatform.guestAuthentication else {
             throw AnimeAPIError.authenticationFailed
         }
@@ -906,6 +407,10 @@ final class AnimeAPIClient: ObservableObject {
                 requiresAuthentication: false
             )
         )
+        try Task.checkCancellation()
+        guard guestSessionScope == scope else {
+            throw CancellationError()
+        }
         guard let publicKey = string(
             for: ["publicKey", "public_key"],
             in: publicKeyPayload.value
@@ -937,6 +442,10 @@ final class AnimeAPIClient: ObservableObject {
             ),
             travelerKey: travelerKey
         )
+        try Task.checkCancellation()
+        guard guestSessionScope == scope else {
+            throw CancellationError()
+        }
         rememberImageDomain(from: response)
         guard let token = accessToken(in: response.value), !token.isEmpty else {
             throw AnimeAPIError.authenticationFailed
@@ -944,7 +453,12 @@ final class AnimeAPIClient: ObservableObject {
         return token
     }
 
-    private func imageDomain(for payload: ServerPayload) -> String? {
+    private func clearGuestLoginTask(id: UUID) {
+        guard guestLoginTask?.id == id else { return }
+        guestLoginTask = nil
+    }
+
+    func imageDomain(for payload: ServerPayload) -> String? {
         payload.domain ?? settings.effectiveImageDomain
     }
 
@@ -1044,28 +558,7 @@ final class AnimeAPIClient: ObservableObject {
         return nil
     }
 
-    private func normalizedPayload(
-        _ value: Any,
-        fallbackDomain: String?
-    ) -> ServerPayload {
-        guard let object = value as? JSONObject else {
-            return ServerPayload(value: value, domain: fallbackDomain)
-        }
-        let domain = object.string(for: ["domain", "imgDomain", "imageDomain"])
-            ?? object.object(for: ["data", "result"])?.string(
-                for: ["domain", "imgDomain", "imageDomain"]
-            )
-            ?? fallbackDomain
-        let isEnvelope = object.value(for: ["code", "status"]) != nil
-            || (object.value(for: ["domain", "imgDomain", "imageDomain"]) != nil
-                && object.value(for: ["data", "result"]) != nil)
-        if isEnvelope, let nested = object.value(for: ["data", "result"]) {
-            return ServerPayload(value: nested, domain: domain)
-        }
-        return ServerPayload(value: object, domain: domain)
-    }
-
-    private func endpointURL(path: String, query: [String: String]) -> URL? {
+    func endpointURL(path: String, query: [String: String]) -> URL? {
         let endpoint = settings.apiBaseURL.appendingPathComponent(
             path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         )
@@ -1117,44 +610,74 @@ final class AnimeAPIClient: ObservableObject {
         return timestamp
     }
 
-    private func decryptJSON(_ encrypted: String) throws -> Any {
-        let keyString = String(settings.effectiveAccessToken.dropFirst(2).prefix(16))
-        guard keyString.utf8.count == kCCKeySizeAES128 else {
-            throw AnimeAPIError.missingDecryptionKey
+    func mapPayload<T>(
+        _ transform: @escaping () throws -> T
+    ) async throws -> T {
+        let task = Task.detached(priority: .userInitiated) {
+            try Task.checkCancellation()
+            return try transform()
         }
-        guard let encryptedData = Data(base64Encoded: encrypted) else {
-            throw AnimeAPIError.decryptionFailed
-        }
-
-        let key = Data(keyString.utf8)
-        var output = Data(count: encryptedData.count + kCCBlockSizeAES128)
-        let outputCapacity = output.count
-        var outputLength = 0
-        let status = output.withUnsafeMutableBytes { outputBytes in
-            encryptedData.withUnsafeBytes { encryptedBytes in
-                key.withUnsafeBytes { keyBytes in
-                    CCCrypt(
-                        CCOperation(kCCDecrypt),
-                        CCAlgorithm(kCCAlgorithmAES),
-                        CCOptions(kCCOptionPKCS7Padding),
-                        keyBytes.baseAddress,
-                        key.count,
-                        keyBytes.baseAddress,
-                        encryptedBytes.baseAddress,
-                        encryptedData.count,
-                        outputBytes.baseAddress,
-                        outputCapacity,
-                        &outputLength
-                    )
-                }
+        return try await withTaskCancellationHandler {
+            do {
+                let value = try await task.value
+                try Task.checkCancellation()
+                return value
+            } catch {
+                try Task.checkCancellation()
+                throw error
             }
+        } onCancel: {
+            task.cancel()
         }
-        guard status == kCCSuccess else { throw AnimeAPIError.decryptionFailed }
-        output.removeSubrange(outputLength..<output.count)
-        return try JSONSerialization.jsonObject(with: output)
     }
 
-    private let settings: AppSettings
+    func animePage(
+        from payload: ServerPayload,
+        page: Int,
+        pageSize: Int,
+        contentKindHint: AnimeContentKind? = nil
+    ) async throws -> AnimePage {
+        let value = payload.value
+        let domain = imageDomain(for: payload)
+        let baseURL = settings.rootURL
+        return try await mapPayload {
+            let items = AnimeMapper.animeList(
+                from: value,
+                domain: domain,
+                baseURL: baseURL,
+                contentKindHint: contentKindHint
+            )
+            let total = AnimeMapper.totalCount(from: value)
+            return AnimePage(
+                items: items,
+                page: page,
+                hasMore: total.map { page * pageSize < $0 }
+                    ?? (items.count >= pageSize)
+            )
+        }
+    }
+
+    let settings: AppSettings
     private let session: URLSession
-    private var guestLoginTask: Task<String, Error>?
+    private var guestSessionScope: String {
+        [
+            settings.platformID.rawValue,
+            settings.rootURL.absoluteString,
+            settings.normalizedAPIPrefix
+        ].joined(separator: "|")
+    }
+
+    private struct GuestLoginTaskEntry {
+        let id: UUID
+        let scope: String
+        let task: Task<String, Error>
+    }
+
+    private var guestLoginTask: GuestLoginTaskEntry?
+    struct DetailTaskEntry {
+        let task: Task<AnimeDetail, Error>
+        var waiters: Set<UUID>
+    }
+
+    var detailTasks: [String: DetailTaskEntry] = [:]
 }

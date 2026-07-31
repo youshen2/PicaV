@@ -30,7 +30,7 @@ struct CommunityComposePage: View {
                     loggedOutContent
                 }
             }
-            .navigationTitle("发布图文")
+            .navigationTitle("发布动态")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
@@ -77,7 +77,7 @@ struct CommunityComposePage: View {
                     }
 
                 HStack {
-                    Text("图文动态")
+                    Text("文字动态")
                     Spacer()
                     Text("\(content.count) / 500")
                         .monospacedDigit()

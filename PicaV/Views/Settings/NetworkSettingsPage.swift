@@ -2,22 +2,35 @@ import SwiftUI
 
 struct NetworkSettingsPage: View {
     @EnvironmentObject private var settings: AppSettings
+    @State private var baseURLDraft = ""
+    @State private var apiPrefixDraft = ""
+    @State private var validationError: String?
 
     var body: some View {
         Form {
             Section(
                 header: Text(settings.activePlatform.displayName),
-                footer: Text("服务器配置按平台分别保存。默认通过 HTTPS 连接，API 前缀通常为 /api。")
+                footer: Text(
+                    "编辑完成后点按“应用配置”。切换服务器会清除当前登录与线路信息，"
+                        + "并按平台分别保存配置。"
+                )
             ) {
-                TextField("Base URL", text: $settings.baseURLText)
+                TextField("Base URL", text: $baseURLDraft)
                     .keyboardType(.URL)
                     .textInputAutocapitalization(.never)
                     .disableAutocorrection(true)
-                TextField("API 前缀", text: $settings.apiPrefix)
+                TextField("API 前缀", text: $apiPrefixDraft)
                     .textInputAutocapitalization(.never)
                     .disableAutocorrection(true)
+
+                Button("应用配置") {
+                    applyDraft()
+                }
+                .disabled(!hasPendingChanges)
+
                 Button("恢复当前平台默认值") {
-                    settings.restoreServerDefaults()
+                    baseURLDraft = settings.activePlatform.defaultBaseURL
+                    apiPrefixDraft = settings.activePlatform.defaultAPIPrefix
                 }
             }
 
@@ -38,5 +51,45 @@ struct NetworkSettingsPage: View {
         }
         .navigationTitle("网络")
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear(perform: loadDraft)
+        .onChange(of: settings.platformID) { _ in
+            loadDraft()
+        }
+        .alert(
+            "配置无效",
+            isPresented: Binding(
+                get: { validationError != nil },
+                set: { if !$0 { validationError = nil } }
+            )
+        ) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text(validationError ?? "")
+        }
+    }
+
+    private var hasPendingChanges: Bool {
+        baseURLDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+            != settings.baseURLText
+            || apiPrefixDraft.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            ) != settings.apiPrefix
+    }
+
+    private func loadDraft() {
+        baseURLDraft = settings.baseURLText
+        apiPrefixDraft = settings.apiPrefix
+    }
+
+    private func applyDraft() {
+        do {
+            try settings.applyServerConfiguration(
+                baseURLText: baseURLDraft,
+                apiPrefix: apiPrefixDraft
+            )
+            loadDraft()
+        } catch {
+            validationError = error.localizedDescription
+        }
     }
 }

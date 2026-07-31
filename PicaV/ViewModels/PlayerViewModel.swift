@@ -33,16 +33,20 @@ final class PlayerViewModel: ObservableObject {
         anime: Anime,
         episodeID: String,
         episodeTitle: String,
+        initialDetail: AnimeDetail? = nil,
         client: AnimeAPIClient,
         library: LibraryStore,
-        downloads: VideoDownloadService
+        downloads: VideoDownloadService,
+        onPlaybackEnded: @escaping () -> Void = {}
     ) {
         self.anime = anime
         self.episodeID = episodeID
         requestedEpisodeTitle = episodeTitle
+        self.initialDetail = initialDetail
         self.client = client
         self.library = library
         self.downloads = downloads
+        self.onPlaybackEnded = onPlaybackEnded
     }
 
     func prepare() async {
@@ -68,12 +72,16 @@ final class PlayerViewModel: ObservableObject {
         }
 
         do {
-            async let detailTask = client.fetchDetail(
-                videoID: episodeID,
-                fallbackAnime: anime
-            )
             async let linesTask = client.fetchCDNLines()
-            let loadedDetail = try await detailTask
+            let loadedDetail: AnimeDetail
+            if let initialDetail {
+                loadedDetail = initialDetail
+            } else {
+                loadedDetail = try await client.fetchDetail(
+                    videoID: episodeID,
+                    fallbackAnime: anime
+                )
+            }
             let loadedLines = (try? await linesTask) ?? []
             let loadedSources = try playbackSources(
                 detail: loadedDetail,
@@ -89,8 +97,12 @@ final class PlayerViewModel: ObservableObject {
             resumeTime = savedResumeTime()
             state = .loaded
         } catch is CancellationError {
-            return
+            state = .idle
         } catch {
+            guard !Task.isCancelled else {
+                state = .idle
+                return
+            }
             state = .failed(error.localizedDescription)
         }
     }
@@ -106,10 +118,30 @@ final class PlayerViewModel: ObservableObject {
 
     func progressDidChange(currentTime: TimeInterval, totalTime: TimeInterval) {
         guard currentTime.isFinite, totalTime.isFinite else { return }
+        let replayTolerance = min(
+            2,
+            max(totalTime * 0.02, 0.1)
+        )
+        if didSignalPlaybackEnd,
+           currentTime + replayTolerance < currentProgress {
+            didSignalPlaybackEnd = false
+        }
         currentProgress = max(currentTime, 0)
         currentDuration = max(totalTime, 0)
         if abs(currentProgress - lastPersistedProgress) >= 10 {
             persistProgress()
+        }
+    }
+
+    func playbackDidFinish() {
+        guard !didSignalPlaybackEnd else { return }
+        didSignalPlaybackEnd = true
+        if currentDuration > 0 {
+            currentProgress = max(currentProgress, currentDuration)
+        }
+        persistProgress()
+        if client.autoplayNextEpisode {
+            onPlaybackEnded()
         }
     }
 
@@ -186,11 +218,14 @@ final class PlayerViewModel: ObservableObject {
     private let anime: Anime
     private let episodeID: String
     private let requestedEpisodeTitle: String
+    private let initialDetail: AnimeDetail?
     private let client: AnimeAPIClient
     private let library: LibraryStore
     private let downloads: VideoDownloadService
+    private let onPlaybackEnded: () -> Void
     private var currentProgress: TimeInterval = 0
     private var currentDuration: TimeInterval = 0
     private var lastPersistedProgress: TimeInterval = -10
+    private var didSignalPlaybackEnd = false
     private static let localSourceID = "__local_download__"
 }

@@ -409,6 +409,17 @@ private struct AnimeCommentThreadPage: View {
                             ProgressView()
                             Spacer()
                         }
+                    } else if let message = viewModel.loadMoreErrorMessage {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("更多回复加载失败")
+                                .font(.subheadline.weight(.semibold))
+                            Text(message)
+                                .font(.footnote)
+                                .foregroundColor(.secondary)
+                            Button("重试") {
+                                Task { await viewModel.retryLoadMore() }
+                            }
+                        }
                     }
                 }
             }

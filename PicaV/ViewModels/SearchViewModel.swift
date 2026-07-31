@@ -8,6 +8,7 @@ final class SearchViewModel: ObservableObject {
     @Published private(set) var results: [Anime] = []
     @Published private(set) var hasMore = false
     @Published private(set) var isLoadingMore = false
+    @Published private(set) var loadMoreErrorMessage: String?
     @Published private(set) var hotWords: [String] = []
     @Published private(set) var hotWordsState: LoadState = .idle
     @Published private(set) var searchHistory: [String]
@@ -26,11 +27,14 @@ final class SearchViewModel: ObservableObject {
 
     func queryDidChange() {
         debounceTask?.cancel()
+        activeSearchRequestID = nil
+        invalidateLoadMore()
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             state = .idle
             results = []
             hasMore = false
+            loadMoreErrorMessage = nil
             return
         }
 
@@ -86,6 +90,9 @@ final class SearchViewModel: ObservableObject {
         ) ?? []
         hotWords = []
         hotWordsState = .idle
+        debounceTask?.cancel()
+        activeSearchRequestID = nil
+        invalidateLoadMore()
         query = ""
         results = []
         state = .idle
@@ -97,6 +104,9 @@ final class SearchViewModel: ObservableObject {
         refreshPlatformContextIfNeeded()
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        let requestID = UUID()
+        activeSearchRequestID = requestID
+        invalidateLoadMore()
         if recordsHistory {
             recordHistory(trimmed)
         }
@@ -104,36 +114,85 @@ final class SearchViewModel: ObservableObject {
         do {
             let page = try await client.search(query: trimmed, page: 1)
             guard query.trimmingCharacters(in: .whitespacesAndNewlines)
-                == trimmed else {
+                == trimmed,
+                activeSearchRequestID == requestID,
+                !Task.isCancelled else {
                 return
             }
-            results = page.items
+            results = page.items.stableUniqued(id: \.id)
             currentPage = 1
             hasMore = page.hasMore
+            loadMoreErrorMessage = nil
             state = .loaded
         } catch is CancellationError {
-            return
+            restoreStateAfterCancellation(requestID)
         } catch {
+            guard activeSearchRequestID == requestID else { return }
             state = .failed(error.localizedDescription)
         }
     }
 
     func loadMoreIfNeeded(current item: Anime) async {
-        guard item.id == results.last?.id, hasMore, !isLoadingMore else { return }
+        guard state == .loaded,
+              item.id == results.last?.id,
+              hasMore,
+              !isLoadingMore else {
+            return
+        }
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
+        let requestID = UUID()
+        activeLoadMoreRequestID = requestID
+        let nextPage = currentPage + 1
         isLoadingMore = true
-        defer { isLoadingMore = false }
+        loadMoreErrorMessage = nil
+        defer {
+            if activeLoadMoreRequestID == requestID {
+                isLoadingMore = false
+            }
+        }
         do {
-            let next = try await client.search(query: trimmed, page: currentPage + 1)
-            let existing = Set(results.map(\.id))
-            results.append(contentsOf: next.items.filter { !existing.contains($0.id) })
+            let next = try await client.search(
+                query: trimmed,
+                page: nextPage
+            )
+            guard !Task.isCancelled,
+                  activeLoadMoreRequestID == requestID,
+                  query.trimmingCharacters(in: .whitespacesAndNewlines)
+                    == trimmed else {
+                return
+            }
+            results.append(
+                contentsOf: next.items.stableUniqued(
+                    seededBy: Set(results.map(\.id)),
+                    id: \.id
+                )
+            )
             currentPage = next.page
             hasMore = next.hasMore
+        } catch is CancellationError {
+            return
         } catch {
-            hasMore = false
+            guard activeLoadMoreRequestID == requestID else { return }
+            loadMoreErrorMessage = error.localizedDescription
         }
+    }
+
+    func retryLoadMore() async {
+        guard let item = results.last else { return }
+        await loadMoreIfNeeded(current: item)
+    }
+
+    private func restoreStateAfterCancellation(_ requestID: UUID) {
+        guard activeSearchRequestID == requestID else { return }
+        state = results.isEmpty ? .idle : .loaded
+    }
+
+    private func invalidateLoadMore() {
+        activeLoadMoreRequestID = nil
+        isLoadingMore = false
+        loadMoreErrorMessage = nil
     }
 
     private func recordHistory(_ word: String) {
@@ -162,4 +221,6 @@ final class SearchViewModel: ObservableObject {
     private var currentPlatformID: AnimePlatformID
     private var currentPage = 1
     private var debounceTask: Task<Void, Never>?
+    private var activeSearchRequestID: UUID?
+    private var activeLoadMoreRequestID: UUID?
 }

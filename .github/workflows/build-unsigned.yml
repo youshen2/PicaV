@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: build-unsigned-${{ github.ref }}
@@ -55,6 +55,8 @@ jobs:
     if: needs.select_run.outputs.should_build == 'true'
     runs-on: macos-26
     timeout-minutes: 90
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout
@@ -78,7 +80,23 @@ jobs:
           xcodebuild -showsdks
 
       - name: Build unsigned IPA
-        run: bash build_unsigned_ipa.sh
+        shell: bash
+        env:
+          PICAV_BUILD_NUMBER: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            TAG_VERSION="${GITHUB_REF_NAME#v}"
+            if [[ "${TAG_VERSION}" =~ ^([0-9]+([.][0-9]+){0,2})([-+].*)?$ ]]; then
+              export PICAV_MARKETING_VERSION="${BASH_REMATCH[1]}"
+            else
+              echo "::error::Tag 版本格式无效：${GITHUB_REF_NAME}"
+              exit 1
+            fi
+          fi
+
+          bash build_unsigned_ipa.sh
 
       - name: Upload unsigned IPA
         uses: actions/upload-artifact@v4
@@ -88,8 +106,33 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  release:
+    name: Create GitHub release
+    needs:
+      - select_run
+      - build
+    if: >-
+      needs.select_run.outputs.should_build == 'true' &&
+      needs.build.result == 'success' &&
+      startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+
+    steps:
+      - name: Checkout release history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download unsigned IPA
+        uses: actions/download-artifact@v4
+        with:
+          name: PicaV-iOS-unsigned-${{ github.run_number }}
+          path: release-assets
+
       - name: Generate release body
-        if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -164,7 +207,6 @@ jobs:
           } >> release_body.md
 
       - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           name: PicaV ${{ github.ref_name }}
@@ -172,10 +214,9 @@ jobs:
           body_path: release_body.md
           draft: false
           prerelease: false
-          files: build/PicaV-unsigned.ipa
+          files: release-assets/PicaV-unsigned.ipa
 
       - name: Upload release metadata
-        if: startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@v4
         with:
           name: PicaV-release-metadata-${{ github.run_number }}
@@ -279,10 +320,12 @@ jobs:
     needs:
       - select_run
       - build
+      - release
     if: >-
       needs.select_run.outputs.should_build == 'true' &&
       startsWith(github.ref, 'refs/tags/') &&
-      needs.build.result == 'success'
+      needs.build.result == 'success' &&
+      needs.release.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       actions: read

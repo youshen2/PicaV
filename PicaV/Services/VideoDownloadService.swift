@@ -21,9 +21,17 @@ final class VideoDownloadService: NSObject, ObservableObject {
     ) {
         self.defaults = defaults
         self.fileManager = fileManager
+        fileStore = DownloadFileStore(fileManager: fileManager)
+        persistence = VideoDownloadPersistence(defaults: defaults)
+        progressThrottler = DownloadProgressThrottler()
         items = Self.loadItems(defaults: defaults)
         super.init()
 
+        progressThrottler.setOnFlush { [weak self] updates in
+            Task { @MainActor [weak self] in
+                self?.updateProgress(updates)
+            }
+        }
         _ = assetSession
         restoreSystemTasks()
         validateCompletedItems()
@@ -48,7 +56,7 @@ final class VideoDownloadService: NSObject, ObservableObject {
                 continue
             }
 
-            var item = VideoDownloadItem(
+            let item = VideoDownloadItem(
                 platformID: client.platformID,
                 anime: anime,
                 episodeID: episode.id,
@@ -58,17 +66,12 @@ final class VideoDownloadService: NSObject, ObservableObject {
             queuedCount += 1
 
             do {
-                let sourceURL = try await client.downloadPlaybackURL(
+                try await resolveAndStart(
+                    itemID: id,
                     anime: anime,
-                    episodeID: episode.id
+                    episodeID: episode.id,
+                    client: client
                 )
-                guard self.item(withID: id) != nil else { continue }
-                item.sourceURL = sourceURL
-                item.status = .downloading
-                item.errorMessage = nil
-                item.updatedAt = Date()
-                replaceOrInsert(item)
-                try startAssetDownload(for: item, sourceURL: sourceURL)
             } catch is CancellationError {
                 updateItem(id) {
                     $0.status = .paused
@@ -95,18 +98,17 @@ final class VideoDownloadService: NSObject, ObservableObject {
         }
 
         do {
-            let sourceURL = try await client.downloadPlaybackURL(
+            try await resolveAndStart(
+                itemID: item.id,
                 anime: item.anime,
-                episodeID: item.episodeID
+                episodeID: item.episodeID,
+                client: client
             )
-            guard self.item(withID: item.id) != nil else { return }
+        } catch is CancellationError {
             updateItem(item.id) {
-                $0.sourceURL = sourceURL
-                $0.status = .downloading
+                $0.status = .paused
                 $0.errorMessage = nil
             }
-            guard let refreshed = self.item(withID: item.id) else { return }
-            try startAssetDownload(for: refreshed, sourceURL: sourceURL)
         } catch {
             updateItem(item.id) {
                 $0.status = .failed
@@ -117,6 +119,7 @@ final class VideoDownloadService: NSObject, ObservableObject {
 
     func pause(_ item: VideoDownloadItem) {
         guard item.status == .downloading else { return }
+        progressThrottler.remove(item.id)
         updateItem(item.id) {
             $0.status = .paused
             $0.errorMessage = nil
@@ -146,6 +149,7 @@ final class VideoDownloadService: NSObject, ObservableObject {
     }
 
     func remove(_ item: VideoDownloadItem) {
+        progressThrottler.remove(item.id)
         let localURL = localURL(for: item)
         items.removeAll { $0.id == item.id }
         saveItems()
@@ -155,21 +159,24 @@ final class VideoDownloadService: NSObject, ObservableObject {
             task?.cancel()
         }
         if let localURL {
-            try? fileManager.removeItem(at: localURL)
+            Task(priority: .utility) {
+                await fileStore.remove([localURL])
+            }
         }
     }
 
     func clearCompleted() {
         let completed = items.filter { $0.status == .completed }
         guard !completed.isEmpty else { return }
-        for item in completed {
-            if let localURL = localURL(for: item) {
-                try? fileManager.removeItem(at: localURL)
-            }
+        let localURLs = completed.compactMap {
+            localURL(for: $0)
         }
         let completedIDs = Set(completed.map(\.id))
         items.removeAll { completedIDs.contains($0.id) }
         saveItems()
+        Task(priority: .utility) {
+            await fileStore.remove(localURLs)
+        }
     }
 
     func item(
@@ -219,9 +226,15 @@ final class VideoDownloadService: NSObject, ObservableObject {
 
     private func startAssetDownload(
         for item: VideoDownloadItem,
-        sourceURL: URL
+        sourceURL: URL,
+        allowsCellularAccess: Bool
     ) throws {
-        let asset = AVURLAsset(url: sourceURL)
+        let asset = AVURLAsset(
+            url: sourceURL,
+            options: [
+                AVURLAssetAllowsCellularAccessKey: allowsCellularAccess
+            ]
+        )
         guard let task = assetSession.makeAssetDownloadTask(
             asset: asset,
             assetTitle: "\(item.anime.title) - \(item.episodeTitle)",
@@ -232,6 +245,30 @@ final class VideoDownloadService: NSObject, ObservableObject {
         }
         task.taskDescription = item.id
         task.resume()
+    }
+
+    private func resolveAndStart(
+        itemID: String,
+        anime: Anime,
+        episodeID: String,
+        client: AnimeAPIClient
+    ) async throws {
+        let sourceURL = try await client.downloadPlaybackURL(
+            anime: anime,
+            episodeID: episodeID
+        )
+        try Task.checkCancellation()
+        guard item(withID: itemID) != nil else { return }
+        updateItem(itemID) {
+            $0.status = .downloading
+            $0.errorMessage = nil
+        }
+        guard let refreshed = item(withID: itemID) else { return }
+        try startAssetDownload(
+            for: refreshed,
+            sourceURL: sourceURL,
+            allowsCellularAccess: client.downloadOverCellular
+        )
     }
 
     private func restoreSystemTasks() {
@@ -313,20 +350,34 @@ final class VideoDownloadService: NSObject, ObservableObject {
         saveItems()
     }
 
-    private func updateProgress(_ progress: Double, for id: String) {
-        guard let index = items.firstIndex(where: { $0.id == id }) else {
-            return
-        }
-        items[index].status = .downloading
-        items[index].progress = progress
-        items[index].errorMessage = nil
-
+    private func updateProgress(_ updates: [String: Double]) {
+        guard !updates.isEmpty else { return }
+        var updatedItems = items
         let now = Date()
-        if progress >= 1
-            || now.timeIntervalSince(
-                lastProgressPersistenceDates[id] ?? .distantPast
-            ) >= 1 {
-            lastProgressPersistenceDates[id] = now
+        var shouldPersist = false
+        var didUpdate = false
+        for (id, progress) in updates {
+            guard let index = updatedItems.firstIndex(
+                where: { $0.id == id }
+            ), updatedItems[index].status == .downloading else {
+                continue
+            }
+            updatedItems[index].status = .downloading
+            updatedItems[index].progress = progress
+            updatedItems[index].errorMessage = nil
+            didUpdate = true
+
+            if progress >= 1
+                || now.timeIntervalSince(
+                    lastProgressPersistenceDates[id] ?? .distantPast
+                ) >= 1 {
+                lastProgressPersistenceDates[id] = now
+                shouldPersist = true
+            }
+        }
+        guard didUpdate else { return }
+        items = updatedItems
+        if shouldPersist {
             saveItems()
         }
     }
@@ -336,10 +387,17 @@ final class VideoDownloadService: NSObject, ObservableObject {
     }
 
     private func saveItems() {
-        defaults.set(
-            try? JSONEncoder().encode(items),
-            forKey: Keys.items
-        )
+        persistenceRevision += 1
+        let revision = persistenceRevision
+        let snapshot = items
+        let persistence = persistence
+        lastPersistenceTask = Task {
+            await persistence.save(
+                snapshot,
+                forKey: Keys.items,
+                revision: revision
+            )
+        }
     }
 
     private func localURL(for item: VideoDownloadItem) -> URL? {
@@ -391,7 +449,14 @@ final class VideoDownloadService: NSObject, ObservableObject {
 
     private let defaults: UserDefaults
     private let fileManager: FileManager
+    private let fileStore: DownloadFileStore
+    private let persistence: VideoDownloadPersistence
+    nonisolated private let progressThrottler: DownloadProgressThrottler
+    nonisolated private let delegateEventSequencer =
+        DownloadDelegateEventSequencer()
     private var lastProgressPersistenceDates: [String: Date] = [:]
+    private var persistenceRevision = 0
+    private var lastPersistenceTask: Task<Void, Never>?
     private let delegateQueue: OperationQueue = {
         let queue = OperationQueue()
         queue.name = "work.picav.video-downloads.delegate"
@@ -426,9 +491,7 @@ extension VideoDownloadService: AVAssetDownloadDelegate {
             return
         }
         let progress = min(max(loadedDuration / expectedDuration, 0), 1)
-        Task { @MainActor [weak self] in
-            self?.updateProgress(progress, for: id)
-        }
+        progressThrottler.submit(progress, for: id)
     }
 
     nonisolated func urlSession(
@@ -437,13 +500,16 @@ extension VideoDownloadService: AVAssetDownloadDelegate {
         didFinishDownloadingTo location: URL
     ) {
         guard let id = assetDownloadTask.taskDescription else { return }
+        progressThrottler.remove(id)
         let path = Self.persistedPath(for: location)
-        Task { @MainActor [weak self] in
-            self?.updateItem(id) {
-                $0.localPath = path
-                $0.progress = 1
-                $0.status = .completed
-                $0.errorMessage = nil
+        delegateEventSequencer.enqueue { [weak self] in
+            await MainActor.run { [weak self] in
+                self?.updateItem(id) {
+                    $0.localPath = path
+                    $0.progress = 1
+                    $0.status = .completed
+                    $0.errorMessage = nil
+                }
             }
         }
     }
@@ -454,11 +520,19 @@ extension VideoDownloadService: AVAssetDownloadDelegate {
         didCompleteWithError error: Error?
     ) {
         guard let id = task.taskDescription, let error else { return }
-        Task { @MainActor [weak self] in
-            guard let self, item(withID: id) != nil else { return }
-            updateItem(id) {
-                $0.status = .failed
-                $0.errorMessage = error.localizedDescription
+        progressThrottler.remove(id)
+        let errorMessage = error.localizedDescription
+        delegateEventSequencer.enqueue { [weak self] in
+            await MainActor.run { [weak self] in
+                guard let self,
+                      let item = item(withID: id),
+                      item.status != .completed else {
+                    return
+                }
+                updateItem(id) {
+                    $0.status = .failed
+                    $0.errorMessage = errorMessage
+                }
             }
         }
     }
@@ -466,12 +540,134 @@ extension VideoDownloadService: AVAssetDownloadDelegate {
     nonisolated func urlSessionDidFinishEvents(
         forBackgroundURLSession session: URLSession
     ) {
-        Task { @MainActor in
-            let completionHandler = Self.backgroundEventsCompletionHandler
-            Self.backgroundEventsCompletionHandler = nil
-            completionHandler?()
+        delegateEventSequencer.enqueue { [weak self] in
+            let persistenceTask = await MainActor.run { [weak self] in
+                self?.lastPersistenceTask
+            }
+            await persistenceTask?.value
+            await MainActor.run {
+                let completionHandler =
+                    Self.backgroundEventsCompletionHandler
+                Self.backgroundEventsCompletionHandler = nil
+                completionHandler?()
+            }
         }
     }
+}
+
+private actor DownloadFileStore {
+    init(fileManager: FileManager) {
+        self.fileManager = fileManager
+    }
+
+    func remove(_ urls: [URL]) {
+        for url in urls {
+            guard !Task.isCancelled else { return }
+            try? fileManager.removeItem(at: url)
+        }
+    }
+
+    private let fileManager: FileManager
+}
+
+private actor VideoDownloadPersistence {
+    init(defaults: UserDefaults) {
+        self.defaults = defaults
+    }
+
+    func save(
+        _ items: [VideoDownloadItem],
+        forKey key: String,
+        revision: Int
+    ) {
+        guard revision >= latestRevision,
+              let data = try? JSONEncoder().encode(items) else {
+            return
+        }
+        latestRevision = revision
+        defaults.set(data, forKey: key)
+    }
+
+    private let defaults: UserDefaults
+    private var latestRevision = 0
+}
+
+private final class DownloadDelegateEventSequencer: @unchecked Sendable {
+    @discardableResult
+    func enqueue(
+        _ operation: @escaping @Sendable () async -> Void
+    ) -> Task<Void, Never> {
+        lock.lock()
+        let predecessor = tail
+        let task = Task {
+            await predecessor?.value
+            await operation()
+        }
+        tail = task
+        lock.unlock()
+        return task
+    }
+
+    private let lock = NSLock()
+    private var tail: Task<Void, Never>?
+}
+
+private final class DownloadProgressThrottler: @unchecked Sendable {
+    init(
+        interval: TimeInterval = 0.2
+    ) {
+        self.interval = interval
+    }
+
+    func setOnFlush(
+        _ onFlush: @escaping ([String: Double]) -> Void
+    ) {
+        lock.lock()
+        self.onFlush = onFlush
+        lock.unlock()
+    }
+
+    func submit(_ progress: Double, for id: String) {
+        lock.lock()
+        pending[id] = progress
+        let shouldSchedule = !isFlushScheduled
+        if shouldSchedule {
+            isFlushScheduled = true
+        }
+        lock.unlock()
+
+        guard shouldSchedule else { return }
+        queue.asyncAfter(deadline: .now() + interval) { [weak self] in
+            self?.flush()
+        }
+    }
+
+    func remove(_ id: String) {
+        lock.lock()
+        pending[id] = nil
+        lock.unlock()
+    }
+
+    private func flush() {
+        lock.lock()
+        let updates = pending
+        pending.removeAll(keepingCapacity: true)
+        isFlushScheduled = false
+        let onFlush = self.onFlush
+        lock.unlock()
+        guard !updates.isEmpty, let onFlush else { return }
+        onFlush(updates)
+    }
+
+    private let interval: TimeInterval
+    private let lock = NSLock()
+    private let queue = DispatchQueue(
+        label: "work.picav.video-downloads.progress",
+        qos: .utility
+    )
+    private var pending: [String: Double] = [:]
+    private var isFlushScheduled = false
+    private var onFlush: (([String: Double]) -> Void)?
 }
 
 private enum VideoDownloadError: LocalizedError {

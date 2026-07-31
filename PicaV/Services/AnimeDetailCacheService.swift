@@ -1,4 +1,3 @@
-import CryptoKit
 import Foundation
 
 enum AnimeDetailCacheService {
@@ -6,55 +5,45 @@ enum AnimeDetailCacheService {
 
     @MainActor
     @discardableResult
-    static func configure(defaults: UserDefaults = .standard) -> Task<Void, Never> {
-        if defaults.object(forKey: AnimeCacheSettingsKey.detailIsEnabled) == nil {
-            defaults.set(true, forKey: AnimeCacheSettingsKey.detailIsEnabled)
+    static func configure(
+        defaults: UserDefaults = .standard
+    ) -> Task<Void, Never> {
+        if defaults.object(
+            forKey: AnimeCacheSettingsKey.detailIsEnabled
+        ) == nil {
+            defaults.set(
+                true,
+                forKey: AnimeCacheSettingsKey.detailIsEnabled
+            )
         }
-        if defaults.object(forKey: AnimeCacheSettingsKey.detailMaxDiskSizeMB) == nil {
+        if defaults.object(
+            forKey: AnimeCacheSettingsKey.detailMaxDiskSizeMB
+        ) == nil {
             defaults.set(
                 defaultMaxDiskSizeMB,
                 forKey: AnimeCacheSettingsKey.detailMaxDiskSizeMB
             )
         }
-
         let storedSize = defaults.integer(
             forKey: AnimeCacheSettingsKey.detailMaxDiskSizeMB
         )
-        withLock {
-            diskCapacityBytes = max(storedSize, minimumDiskSizeMB) * 1_024 * 1_024
-            prepareDirectory()
+        configurationGeneration += 1
+        let generation = configurationGeneration
+        return Task(priority: .utility) {
+            await backend.configure(
+                capacityBytes: max(storedSize, minimumDiskSizeMB)
+                    * 1_024 * 1_024,
+                generation: generation
+            )
         }
-
-        activeTrimTask?.cancel()
-        let task = Task.detached(priority: .utility) {
-            guard !Task.isCancelled else { return }
-            withLock {
-                trimIfNeeded()
-            }
-        }
-        activeTrimTask = task
-        return task
     }
 
-    @MainActor
     static func clear() async {
-        activeTrimTask?.cancel()
-        await Task.detached(priority: .utility) {
-            withLock {
-                try? FileManager.default.removeItem(at: directoryURL)
-                prepareDirectory()
-            }
-        }.value
+        await backend.clear()
     }
 
     static func usage() async -> AnimeCacheUsage {
-        await Task.detached(priority: .utility) {
-            withLock {
-                AnimeCacheUsage(
-                    diskBytes: Int(min(diskUsage(), Int64(Int.max)))
-                )
-            }
-        }.value
+        AnimeCacheUsage(diskBytes: await backend.usageBytes())
     }
 
     static func detail(
@@ -62,31 +51,19 @@ enum AnimeDetailCacheService {
         platformID: AnimePlatformID,
         scope: String
     ) async -> AnimeDetail? {
-        guard isEnabled else { return nil }
-        return await Task.detached(priority: .utility) {
-            withLock {
-                let fileURL = cacheFileURL(
-                    videoID: videoID,
-                    platformID: platformID,
-                    scope: scope
-                )
-                guard FileManager.default.fileExists(atPath: fileURL.path) else {
-                    return nil
-                }
-                guard let data = try? Data(contentsOf: fileURL),
-                      let payload = try? JSONDecoder().decode(
-                          CachedDetail.self,
-                          from: data
-                      ),
-                      payload.version == cacheFormatVersion,
-                      isValid(payload.detail) else {
-                    try? FileManager.default.removeItem(at: fileURL)
-                    return nil
-                }
-                touch(fileURL)
-                return payload.detail
-            }
-        }.value
+        guard isEnabled, !Task.isCancelled else { return nil }
+        let payload: CachedDetail? = await backend.value(
+            forKey: cacheKey(
+                videoID: videoID,
+                platformID: platformID,
+                scope: scope
+            ),
+            as: CachedDetail.self
+        ) {
+            $0.version == cacheFormatVersion && isValid($0.detail)
+        }
+        guard !Task.isCancelled else { return nil }
+        return payload?.detail
     }
 
     static func store(
@@ -95,52 +72,42 @@ enum AnimeDetailCacheService {
         platformID: AnimePlatformID,
         scope: String
     ) async {
-        guard isEnabled, isValid(detail) else { return }
-        let cachedDetail = metadataOnly(detail)
-        guard let data = try? JSONEncoder().encode(
-            CachedDetail(
-                version: cacheFormatVersion,
-                cachedAt: Date(),
-                detail: cachedDetail
-            )
-        ) else {
+        guard isEnabled, isValid(detail), !Task.isCancelled else {
             return
         }
-
-        await Task.detached(priority: .utility) {
-            let shouldTrim = withLock {
-                prepareDirectory()
-                let fileURL = cacheFileURL(
-                    videoID: videoID,
-                    platformID: platformID,
-                    scope: scope
-                )
-                do {
-                    try data.write(to: fileURL, options: [.atomic])
-                    touch(fileURL)
-                } catch {
-                    return false
-                }
-                guard !isTrimScheduled else { return false }
-                isTrimScheduled = true
-                return true
-            }
-            if shouldTrim {
-                scheduleTrim()
-            }
-        }.value
+        let payload = CachedDetail(
+            version: cacheFormatVersion,
+            cachedAt: Date(),
+            detail: metadataOnly(detail)
+        )
+        await backend.store(
+            payload,
+            forKey: cacheKey(
+                videoID: videoID,
+                platformID: platformID,
+                scope: scope
+            )
+        )
     }
 
     private static var isEnabled: Bool {
         let defaults = UserDefaults.standard
-        return defaults.object(forKey: AnimeCacheSettingsKey.detailIsEnabled) == nil
+        return defaults.object(
+            forKey: AnimeCacheSettingsKey.detailIsEnabled
+        ) == nil
             ? true
-            : defaults.bool(forKey: AnimeCacheSettingsKey.detailIsEnabled)
+            : defaults.bool(
+                forKey: AnimeCacheSettingsKey.detailIsEnabled
+            )
     }
 
     private static func isValid(_ detail: AnimeDetail) -> Bool {
-        let id = detail.anime.id.trimmingCharacters(in: .whitespacesAndNewlines)
-        let title = detail.anime.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let id = detail.anime.id.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        let title = detail.anime.title.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
         guard !id.isEmpty,
               !title.isEmpty,
               !id.hasPrefix("preview-"),
@@ -162,11 +129,14 @@ enum AnimeDetailCacheService {
 
     private static func validRemoteURL(_ url: URL?) -> Bool {
         guard let url else { return true }
-        return ["http", "https"].contains(url.scheme?.lowercased() ?? "")
-            && url.host?.isEmpty == false
+        return ["http", "https"].contains(
+            url.scheme?.lowercased() ?? ""
+        ) && url.host?.isEmpty == false
     }
 
-    private static func metadataOnly(_ detail: AnimeDetail) -> AnimeDetail {
+    private static func metadataOnly(
+        _ detail: AnimeDetail
+    ) -> AnimeDetail {
         AnimeDetail(
             anime: detail.anime,
             synopsis: detail.synopsis,
@@ -182,102 +152,12 @@ enum AnimeDetailCacheService {
         )
     }
 
-    private static func scheduleTrim() {
-        Task.detached(priority: .utility) {
-            try? await Task.sleep(nanoseconds: 250_000_000)
-            withLock {
-                defer { isTrimScheduled = false }
-                trimIfNeeded()
-            }
-        }
-    }
-
-    private static var directoryURL: URL {
-        let root = FileManager.default.urls(
-            for: .cachesDirectory,
-            in: .userDomainMask
-        ).first ?? FileManager.default.temporaryDirectory
-        return root.appendingPathComponent("AnimeDetailCache", isDirectory: true)
-    }
-
-    private static func cacheFileURL(
+    private static func cacheKey(
         videoID: String,
         platformID: AnimePlatformID,
         scope: String
-    ) -> URL {
-        let key = [platformID.rawValue, scope, videoID].joined(separator: "|")
-        let digest = SHA256.hash(data: Data(key.utf8))
-            .map { String(format: "%02x", $0) }
-            .joined()
-        return directoryURL.appendingPathComponent(
-            "\(digest).json",
-            isDirectory: false
-        )
-    }
-
-    private static func prepareDirectory() {
-        try? FileManager.default.createDirectory(
-            at: directoryURL,
-            withIntermediateDirectories: true
-        )
-    }
-
-    private static func touch(_ fileURL: URL) {
-        try? FileManager.default.setAttributes(
-            [.modificationDate: Date()],
-            ofItemAtPath: fileURL.path
-        )
-    }
-
-    private static func trimIfNeeded() {
-        guard !Task.isCancelled else { return }
-        let files = cacheFiles()
-        var totalBytes = files.reduce(Int64(0)) { $0 + $1.byteCount }
-        guard totalBytes > Int64(diskCapacityBytes) else { return }
-
-        for file in files.sorted(by: { $0.modifiedAt < $1.modifiedAt }) {
-            guard !Task.isCancelled else { return }
-            try? FileManager.default.removeItem(at: file.url)
-            totalBytes -= file.byteCount
-            if totalBytes <= Int64(diskCapacityBytes) {
-                break
-            }
-        }
-    }
-
-    private static func diskUsage() -> Int64 {
-        cacheFiles().reduce(Int64(0)) { $0 + $1.byteCount }
-    }
-
-    private static func cacheFiles() -> [CacheFile] {
-        let keys: Set<URLResourceKey> = [
-            .contentModificationDateKey,
-            .fileSizeKey,
-            .isRegularFileKey
-        ]
-        let urls = (try? FileManager.default.contentsOfDirectory(
-            at: directoryURL,
-            includingPropertiesForKeys: Array(keys),
-            options: [.skipsHiddenFiles]
-        )) ?? []
-
-        return urls.compactMap { url in
-            guard let values = try? url.resourceValues(forKeys: keys),
-                  values.isRegularFile == true else {
-                return nil
-            }
-            return CacheFile(
-                url: url,
-                byteCount: Int64(values.fileSize ?? 0),
-                modifiedAt: values.contentModificationDate ?? .distantPast
-            )
-        }
-    }
-
-    private static func withLock<T>(_ body: () throws -> T) rethrows -> T {
-        lock.lock()
-        defer { lock.unlock() }
-        return try body()
+    ) -> String {
+        [platformID.rawValue, scope, videoID].joined(separator: "|")
     }
 
     private struct CachedDetail: Codable {
@@ -286,16 +166,13 @@ enum AnimeDetailCacheService {
         let detail: AnimeDetail
     }
 
-    private struct CacheFile {
-        let url: URL
-        let byteCount: Int64
-        let modifiedAt: Date
-    }
-
     private static let minimumDiskSizeMB = 5
     private static let cacheFormatVersion = 1
-    private static let lock = NSLock()
-    private static var diskCapacityBytes = defaultMaxDiskSizeMB * 1_024 * 1_024
-    private static var isTrimScheduled = false
-    private static var activeTrimTask: Task<Void, Never>?
+    private static let backend = DiskCacheBackend(
+        directoryName: "AnimeDetailCache",
+        fileExtension: "json",
+        minimumCapacityBytes: minimumDiskSizeMB * 1_024 * 1_024,
+        initialCapacityBytes: defaultMaxDiskSizeMB * 1_024 * 1_024
+    )
+    @MainActor private static var configurationGeneration = 0
 }

@@ -11,6 +11,7 @@ struct AnimeDetailPage: View {
     @State private var showsDownloadSelection = false
     @State private var showsCreatorLogin = false
     @State private var playbackRequest: InlinePlaybackRequest?
+    @State private var allowsPlaybackPreparation: Bool
     @State private var isPageActive = true
 
     private let client: AnimeAPIClient
@@ -20,7 +21,7 @@ struct AnimeDetailPage: View {
         videoID: String,
         preview: Anime? = nil,
         client: AnimeAPIClient,
-        startsPlayback _: Bool = false,
+        startsPlayback: Bool = false,
         initialEpisodeID: String? = nil,
         initialEpisodeTitle: String? = nil
     ) {
@@ -33,9 +34,10 @@ struct AnimeDetailPage: View {
                 client: client
             )
         )
+        _allowsPlaybackPreparation = State(initialValue: startsPlayback)
         _playbackRequest = State(
             initialValue: {
-                guard let preview else { return nil }
+                guard startsPlayback, let preview else { return nil }
                 return InlinePlaybackRequest(
                     anime: preview,
                     episodeID: initialEpisodeID ?? videoID,
@@ -181,6 +183,15 @@ struct AnimeDetailPage: View {
         return preview.map(placeholderDetail)
     }
 
+    private var isPlaybackActive: Bool {
+        isPageActive
+            && scenePhase == .active
+            && !isSharing
+            && !showsComments
+            && !showsDownloadSelection
+            && !showsCreatorLogin
+    }
+
     private var downloadToolbarImage: String {
         guard let detail = downloadDetail else {
             return "arrow.down.circle"
@@ -248,14 +259,11 @@ struct AnimeDetailPage: View {
 
         return List {
             if detail.anime.contentKind.supportsPlayback {
-                InlineAnimePlayerHeader(
+                playbackHeader(
+                    detail: detail,
                     request: activePlaybackRequest,
-                    client: client,
-                    library: library,
-                    downloads: downloads,
-                    isActive: isPageActive && scenePhase == .active
+                    isPreview: isPreview
                 )
-                .id(activePlaybackRequest.id)
                 .listRowInsets(EdgeInsets())
                 .listRowBackground(Color.clear)
                 .listRowSeparator(.hidden)
@@ -441,10 +449,83 @@ struct AnimeDetailPage: View {
         episodeID: String,
         episodeTitle: String
     ) {
+        allowsPlaybackPreparation = true
         playbackRequest = InlinePlaybackRequest(
             anime: anime,
             episodeID: episodeID,
             episodeTitle: episodeTitle
+        )
+    }
+
+    @ViewBuilder
+    private func playbackHeader(
+        detail: AnimeDetail,
+        request: InlinePlaybackRequest,
+        isPreview: Bool
+    ) -> some View {
+        if allowsPlaybackPreparation {
+            InlineAnimePlayerHeader(
+                request: request,
+                initialDetail: !isPreview
+                    && request.episodeID == detail.currentEpisodeID
+                        ? detail
+                        : nil,
+                client: client,
+                library: library,
+                downloads: downloads,
+                isActive: isPlaybackActive,
+                onPlaybackEnded: {
+                    guard let latestDetail = viewModel.detail else {
+                        return
+                    }
+                    playNextEpisode(
+                        after: request.episodeID,
+                        in: latestDetail
+                    )
+                }
+            )
+            .id(request.id)
+        } else {
+            Button {
+                startPlayback(
+                    anime: detail.anime,
+                    episodeID: request.episodeID,
+                    episodeTitle: request.episodeTitle
+                )
+            } label: {
+                ZStack {
+                    Color.black
+                    VStack(spacing: 10) {
+                        Image(systemName: "play.circle.fill")
+                            .font(.system(size: 52))
+                        Text("播放")
+                            .font(.headline)
+                    }
+                    .foregroundColor(.white)
+                }
+                .aspectRatio(16 / 9, contentMode: .fit)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("播放 \(request.episodeTitle)")
+        }
+    }
+
+    private func playNextEpisode(
+        after episodeID: String,
+        in detail: AnimeDetail
+    ) {
+        guard let currentIndex = detail.episodes.firstIndex(
+            where: { $0.id == episodeID }
+        ) else {
+            return
+        }
+        let nextIndex = detail.episodes.index(after: currentIndex)
+        guard detail.episodes.indices.contains(nextIndex) else { return }
+        let nextEpisode = detail.episodes[nextIndex]
+        startPlayback(
+            anime: detail.anime,
+            episodeID: nextEpisode.id,
+            episodeTitle: nextEpisode.title
         )
     }
 }

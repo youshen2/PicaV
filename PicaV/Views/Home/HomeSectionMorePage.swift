@@ -85,6 +85,12 @@ struct HomeSectionMorePage: View {
                     if viewModel.isLoadingMore {
                         ProgressView()
                             .padding()
+                    } else if viewModel.loadMoreErrorMessage != nil {
+                        Button("重试加载更多") {
+                            Task { await viewModel.retryLoadMore() }
+                        }
+                        .buttonStyle(.bordered)
+                        .padding()
                     }
                 }
                 .padding()

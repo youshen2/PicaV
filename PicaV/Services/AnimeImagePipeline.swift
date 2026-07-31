@@ -12,33 +12,69 @@ final class AnimeImagePipeline {
         configuration: PlatformImageConfiguration,
         maxPixelSize: CGFloat
     ) async throws -> UIImage {
-        let cacheKey = [
+        let cacheKeyValue = [
             url.absoluteString,
             String(Int(maxPixelSize)),
             configuration.widthSuffix ?? "",
             configuration.xorKey ?? "",
             configuration.fallbackHost ?? ""
-        ].joined(separator: "|") as NSString
-        let diskCacheKey = [
-            url.absoluteString,
-            configuration.widthSuffix ?? "",
-            configuration.xorKey ?? "",
-            configuration.fallbackHost ?? ""
         ].joined(separator: "|")
+        let cacheKey = cacheKeyValue as NSString
         if let cached = imageCache.object(forKey: cacheKey) {
             return cached
         }
+        return try await requestCoordinator.image(
+            for: cacheKeyValue
+        ) { [self] in
+            try await loadImage(
+                for: url,
+                cacheKey: cacheKey,
+                proxyBaseURL: proxyBaseURL,
+                useProxy: useProxy,
+                configuration: configuration,
+                maxPixelSize: maxPixelSize
+            )
+        }
+    }
+
+    private func loadImage(
+        for url: URL,
+        cacheKey: NSString,
+        proxyBaseURL: URL?,
+        useProxy: Bool,
+        configuration: PlatformImageConfiguration,
+        maxPixelSize: CGFloat
+    ) async throws -> UIImage {
+        try Task.checkCancellation()
+        if let cached = imageCache.object(forKey: cacheKey) {
+            return cached
+        }
+        let prefersWidthSuffix = shouldPreferWidthSuffix(
+            configuration.widthSuffix,
+            maxPixelSize: maxPixelSize
+        )
+        let diskCacheKey = [
+            url.absoluteString,
+            prefersWidthSuffix
+                ? configuration.widthSuffix ?? ""
+                : "full",
+            configuration.xorKey ?? "",
+            configuration.fallbackHost ?? ""
+        ].joined(separator: "|")
         if url.scheme?.lowercased() != "data",
            let cachedData = await AnimeImageCacheService.cachedData(
                forKey: diskCacheKey
            ) {
+            try Task.checkCancellation()
             if let image = decode(data: cachedData, maxPixelSize: maxPixelSize) {
+                try Task.checkCancellation()
                 imageCache.setObject(image, forKey: cacheKey, cost: imageCost(image))
                 return image
             }
-            AnimeImageCacheService.remove(forKey: diskCacheKey)
+            await AnimeImageCacheService.remove(forKey: diskCacheKey)
         }
 
+        try Task.checkCancellation()
         let normalizedURL = normalizedRemoteURL(
             url,
             proxyBaseURL: proxyBaseURL,
@@ -51,12 +87,13 @@ final class AnimeImagePipeline {
 
         var candidates: [URL] = []
         for source in sources {
-            var variants: [URL] = []
+            var variants = [source]
             if let suffix = configuration.widthSuffix,
                let suffixed = widthSuffixedURL(source, suffix: suffix) {
-                variants.append(suffixed)
+                variants = prefersWidthSuffix
+                    ? [suffixed, source]
+                    : [source, suffixed]
             }
-            variants.append(source)
 
             for variant in variants {
                 if useProxy,
@@ -78,30 +115,38 @@ final class AnimeImagePipeline {
         var lastError: Error = URLError(.cannotDecodeContentData)
         for candidate in candidates {
             do {
+                try Task.checkCancellation()
                 let data = try await loadData(from: candidate)
+                try Task.checkCancellation()
                 let decodedData = xorDecoded(data, key: configuration.xorKey)
                 if let image = decode(data: decodedData, maxPixelSize: maxPixelSize) {
+                    try Task.checkCancellation()
                     if url.scheme?.lowercased() != "data" {
                         await AnimeImageCacheService.store(
                             decodedData,
                             forKey: diskCacheKey
                         )
                     }
+                    try Task.checkCancellation()
                     imageCache.setObject(image, forKey: cacheKey, cost: imageCost(image))
                     return image
                 }
                 if decodedData != data,
                    let image = decode(data: data, maxPixelSize: maxPixelSize) {
+                    try Task.checkCancellation()
                     if url.scheme?.lowercased() != "data" {
                         await AnimeImageCacheService.store(
                             data,
                             forKey: diskCacheKey
                         )
                     }
+                    try Task.checkCancellation()
                     imageCache.setObject(image, forKey: cacheKey, cost: imageCost(image))
                     return image
                 }
                 lastError = URLError(.cannotDecodeContentData)
+            } catch is CancellationError {
+                throw CancellationError()
             } catch {
                 lastError = error
             }
@@ -111,6 +156,7 @@ final class AnimeImagePipeline {
 
     @MainActor
     func clear() async {
+        await requestCoordinator.cancelAll()
         imageCache.removeAllObjects()
         await AnimeImageCacheService.clear()
     }
@@ -205,6 +251,18 @@ final class AnimeImagePipeline {
         return components.url
     }
 
+    private func shouldPreferWidthSuffix(
+        _ suffix: String?,
+        maxPixelSize: CGFloat
+    ) -> Bool {
+        guard let suffix,
+              let width = Double(suffix),
+              width > 0 else {
+            return false
+        }
+        return Double(maxPixelSize) <= width * 1.5
+    }
+
     private func unique(_ urls: [URL]) -> [URL] {
         var seen = Set<String>()
         return urls.filter { seen.insert($0.absoluteString).inserted }
@@ -267,5 +325,6 @@ final class AnimeImagePipeline {
     }
 
     private let imageCache = NSCache<NSString, UIImage>()
+    private let requestCoordinator = AnimeImageRequestCoordinator()
     private let session: URLSession
 }

@@ -20,14 +20,25 @@ final class AnimeDetailViewModel: ObservableObject {
 
     func load(force: Bool = false) async {
         if !force, state == .loaded { return }
+        let requestID = UUID()
+        activeLoadRequestID = requestID
+        let requestedPlatformID = client.platformID
+        let requestedCacheScope = client.detailCacheScope
 
         var hasCachedDetail = false
         if !force,
            let cached = await AnimeDetailCacheService.detail(
                videoID: videoID,
-               platformID: client.platformID,
-               scope: client.detailCacheScope
+               platformID: requestedPlatformID,
+               scope: requestedCacheScope
            ) {
+            guard isCurrent(
+                requestID,
+                platformID: requestedPlatformID,
+                cacheScope: requestedCacheScope
+            ) else {
+                return
+            }
             detail = cached
             platformIsFavorite = cached.isFavorite
             state = .loaded
@@ -46,20 +57,58 @@ final class AnimeDetailViewModel: ObservableObject {
                 contentKind: preview?.contentKind ?? .anime
             )
             let loadedDetail = try await detailTask
+            guard isCurrent(
+                requestID,
+                platformID: requestedPlatformID,
+                cacheScope: requestedCacheScope
+            ) else {
+                restoreStateAfterCancellation(requestID)
+                return
+            }
             detail = loadedDetail
             platformIsFavorite = loadedDetail.isFavorite
-            recommendations = (try? await recommendationsTask) ?? []
+            let loadedRecommendations =
+                (try? await recommendationsTask) ?? []
+            guard isCurrent(
+                requestID,
+                platformID: requestedPlatformID,
+                cacheScope: requestedCacheScope
+            ) else {
+                restoreStateAfterCancellation(requestID)
+                return
+            }
+            recommendations = loadedRecommendations
             state = .loaded
             await AnimeDetailCacheService.store(
                 loadedDetail,
                 videoID: videoID,
-                platformID: client.platformID,
-                scope: client.detailCacheScope
+                platformID: requestedPlatformID,
+                scope: requestedCacheScope
             )
-            await enrichUploaderIfNeeded(in: loadedDetail)
+            guard isCurrent(
+                requestID,
+                platformID: requestedPlatformID,
+                cacheScope: requestedCacheScope
+            ) else {
+                return
+            }
+            await enrichUploaderIfNeeded(
+                in: loadedDetail,
+                requestID: requestID,
+                platformID: requestedPlatformID,
+                cacheScope: requestedCacheScope
+            )
         } catch is CancellationError {
-            return
+            restoreStateAfterCancellation(requestID)
         } catch {
+            guard isCurrent(
+                requestID,
+                platformID: requestedPlatformID,
+                cacheScope: requestedCacheScope
+            ) else {
+                restoreStateAfterCancellation(requestID)
+                return
+            }
             if !hasCachedDetail && detail == nil {
                 state = .failed(error.localizedDescription)
             }
@@ -120,12 +169,29 @@ final class AnimeDetailViewModel: ObservableObject {
         }
     }
 
-    private func enrichUploaderIfNeeded(in loadedDetail: AnimeDetail) async {
-        guard client.supportsCreatorProfiles,
+    private func enrichUploaderIfNeeded(
+        in loadedDetail: AnimeDetail,
+        requestID: UUID,
+        platformID: AnimePlatformID,
+        cacheScope: String
+    ) async {
+        guard isCurrent(
+            requestID,
+            platformID: platformID,
+            cacheScope: cacheScope
+        ),
+              client.supportsCreatorProfiles,
               let uploader = loadedDetail.uploader,
               let profile = try? await client.fetchCreatorProfile(
                   userID: uploader.id
-              ),
+              ) else {
+            return
+        }
+        guard isCurrent(
+            requestID,
+            platformID: platformID,
+            cacheScope: cacheScope
+        ),
               detail?.id == loadedDetail.id else {
             return
         }
@@ -143,12 +209,29 @@ final class AnimeDetailViewModel: ObservableObject {
         await AnimeDetailCacheService.store(
             enrichedDetail,
             videoID: videoID,
-            platformID: client.platformID,
-            scope: client.detailCacheScope
+            platformID: platformID,
+            scope: cacheScope
         )
+    }
+
+    private func isCurrent(
+        _ requestID: UUID,
+        platformID: AnimePlatformID,
+        cacheScope: String
+    ) -> Bool {
+        !Task.isCancelled
+            && activeLoadRequestID == requestID
+            && client.platformID == platformID
+            && client.detailCacheScope == cacheScope
+    }
+
+    private func restoreStateAfterCancellation(_ requestID: UUID) {
+        guard activeLoadRequestID == requestID else { return }
+        state = detail == nil ? .idle : .loaded
     }
 
     private let videoID: String
     private let preview: Anime?
     private let client: AnimeAPIClient
+    private var activeLoadRequestID: UUID?
 }

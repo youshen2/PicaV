@@ -14,7 +14,6 @@ struct VideoDownloadItem: Identifiable, Codable, Hashable {
     let anime: Anime
     let episodeID: String
     let episodeTitle: String
-    var sourceURL: URL?
     var localPath: String?
     var progress: Double
     var status: VideoDownloadStatus
@@ -37,7 +36,6 @@ struct VideoDownloadItem: Identifiable, Codable, Hashable {
         self.anime = anime
         self.episodeID = episodeID
         self.episodeTitle = episodeTitle
-        sourceURL = nil
         localPath = nil
         progress = 0
         status = .preparing

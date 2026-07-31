@@ -9,11 +9,13 @@ struct KSPlayerContainerView: UIViewRepresentable {
     let resumeTime: TimeInterval
     let isActive: Bool
     let onProgress: (TimeInterval, TimeInterval) -> Void
+    let onPlaybackEnded: () -> Void
     let onSourceChange: (Int) -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
             onProgress: onProgress,
+            onPlaybackEnded: onPlaybackEnded,
             onSourceChange: onSourceChange
         )
     }
@@ -30,6 +32,7 @@ struct KSPlayerContainerView: UIViewRepresentable {
 
     func updateUIView(_ hostView: PicaPlayerHostView, context: Context) {
         context.coordinator.onProgress = onProgress
+        context.coordinator.onPlaybackEnded = onPlaybackEnded
         context.coordinator.onSourceChange = onSourceChange
         configure(hostView.playerView, coordinator: context.coordinator)
     }
@@ -91,21 +94,27 @@ struct KSPlayerContainerView: UIViewRepresentable {
 
     final class Coordinator {
         var onProgress: (TimeInterval, TimeInterval) -> Void
+        var onPlaybackEnded: () -> Void
         var onSourceChange: (Int) -> Void
         var resourceSignature: String?
         var wasActive: Bool?
 
         init(
             onProgress: @escaping (TimeInterval, TimeInterval) -> Void,
+            onPlaybackEnded: @escaping () -> Void,
             onSourceChange: @escaping (Int) -> Void
         ) {
             self.onProgress = onProgress
+            self.onPlaybackEnded = onPlaybackEnded
             self.onSourceChange = onSourceChange
         }
 
         func attach(to view: PicaKSPlayerView) {
             view.playTimeDidChange = { [weak self] currentTime, totalTime in
                 self?.onProgress(currentTime, totalTime)
+            }
+            view.playbackDidFinish = { [weak self] in
+                self?.onPlaybackEnded()
             }
             view.sourceDidChange = { [weak self] index in
                 self?.onSourceChange(index)
@@ -147,6 +156,7 @@ final class PicaPlayerHostView: UIView {
 }
 
 final class PicaKSPlayerView: IOSVideoPlayerView {
+    var playbackDidFinish: (() -> Void)?
     var sourceDidChange: ((Int) -> Void)?
 
     override func player(layer: KSPlayerLayer, state: KSPlayerState) {
@@ -156,24 +166,51 @@ final class PicaKSPlayerView: IOSVideoPlayerView {
         }
     }
 
-    override func updateUI(isFullScreen: Bool) {
-        super.updateUI(isFullScreen: isFullScreen)
-        let delay: TimeInterval = isFullScreen ? 0.15 : 0.45
-        if isFullScreen {
-            requestOrientation(.landscapeRight)
+    override func player(layer: KSPlayerLayer, finish error: Error?) {
+        super.player(layer: layer, finish: error)
+        if error == nil {
+            playbackDidFinish?()
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-            guard let self else { return }
-            self.requestOrientation(
-                isFullScreen ? .landscapeRight : .portrait
+    }
+
+    override func onButtonPressed(
+        type: PlayerButtonType,
+        button: UIButton
+    ) {
+        if type == .back,
+           fullScreenPresentationState != .inline {
+            updateUI(isFullScreen: false)
+            return
+        }
+        if type == .landscape {
+            guard fullScreenPresentationState == .inline
+                    || fullScreenPresentationState == .fullScreen else {
+                return
+            }
+            updateUI(
+                isFullScreen: fullScreenPresentationState == .inline
             )
-            self.superview?.setNeedsLayout()
-            self.superview?.layoutIfNeeded()
-            self.setNeedsLayout()
-            self.layoutIfNeeded()
-            self.playerLayer?.player.view?.setNeedsLayout()
-            if !isFullScreen, self.playerLayer?.state.isPlaying == true {
-                self.play()
+            return
+        }
+        super.onButtonPressed(type: type, button: button)
+    }
+
+    override func updateUI(isFullScreen: Bool) {
+        if isFullScreen {
+            guard fullScreenPresentationState == .inline else { return }
+            fullScreenPresentationState = .entering
+            if !enterFullScreen() {
+                fullScreenPresentationState = .inline
+            }
+        } else {
+            switch fullScreenPresentationState {
+            case .entering:
+                shouldExitAfterPresentation = true
+            case .fullScreen:
+                fullScreenPresentationState = .exiting
+                exitFullScreen()
+            case .inline, .exiting:
+                return
             }
         }
     }
@@ -212,9 +249,14 @@ final class PicaKSPlayerView: IOSVideoPlayerView {
             to: target,
             toleranceBefore: tolerance,
             toleranceAfter: tolerance
-        )
-        play()
-        completion(true)
+        ) { [weak self] finished in
+            DispatchQueue.main.async {
+                if finished {
+                    self?.play()
+                }
+                completion(finished)
+            }
+        }
     }
 
     private func installPlaybackRateMenu() {
@@ -254,6 +296,141 @@ final class PicaKSPlayerView: IOSVideoPlayerView {
         return min(lowerBound, duration - 0.1)
     }
 
+    @discardableResult
+    private func enterFullScreen() -> Bool {
+        guard fullScreenController == nil,
+              let presenter = enclosingViewController,
+              let originalSuperview = superview else {
+            return false
+        }
+
+        originalPlayerSuperview = originalSuperview
+        originalPlayerFrame = frame
+        originalTranslatesAutoresizingMaskIntoConstraints =
+            translatesAutoresizingMaskIntoConstraints
+        originalPlayerConstraints = constraintsConnectingPlayer(
+            in: originalSuperview
+        )
+        originalOrientationMask = KSOptions.supportedInterfaceOrientations
+        originalPopGestureEnabled = presenter.navigationController?
+            .interactivePopGestureRecognizer?.isEnabled
+        presenter.navigationController?
+            .interactivePopGestureRecognizer?.isEnabled = false
+
+        NSLayoutConstraint.deactivate(originalPlayerConstraints)
+
+        let targetMask: UIInterfaceOrientationMask =
+            isHorizonal() ? .landscapeRight : .portrait
+        let controller = PicaPlayerFullScreenViewController(
+            orientationMask: targetMask
+        )
+        controller.modalPresentationStyle = .fullScreen
+        controller.modalPresentationCapturesStatusBarAppearance = true
+        controller.isModalInPresentation = true
+        controller.view.backgroundColor = .black
+
+        controller.view.addSubview(self)
+        translatesAutoresizingMaskIntoConstraints = false
+        fullScreenConstraints = [
+            topAnchor.constraint(equalTo: controller.view.topAnchor),
+            leadingAnchor.constraint(equalTo: controller.view.leadingAnchor),
+            trailingAnchor.constraint(equalTo: controller.view.trailingAnchor),
+            bottomAnchor.constraint(equalTo: controller.view.bottomAnchor)
+        ]
+        NSLayoutConstraint.activate(fullScreenConstraints)
+
+        fullScreenPresenter = presenter
+        fullScreenController = controller
+        landscapeButton.isSelected = true
+        KSOptions.supportedInterfaceOrientations = targetMask
+        super.updateUI(isLandscape: targetMask != .portrait)
+
+        presenter.present(controller, animated: true) { [weak self] in
+            guard let self else { return }
+            fullScreenPresentationState = .fullScreen
+            requestOrientation(targetMask)
+            refreshPlayerLayout()
+            if shouldExitAfterPresentation {
+                shouldExitAfterPresentation = false
+                updateUI(isFullScreen: false)
+            }
+        }
+        return true
+    }
+
+    private func exitFullScreen() {
+        guard let controller = fullScreenController else { return }
+        let restoreMask = originalOrientationMask ?? .portrait
+        controller.orientationMask = restoreMask
+        KSOptions.supportedInterfaceOrientations = restoreMask
+        requestOrientation(restoreMask)
+
+        let presenter =
+            controller.presentingViewController ?? fullScreenPresenter
+        presenter?.dismiss(animated: true) { [weak self] in
+            self?.restoreInlinePlayer(orientationMask: restoreMask)
+        }
+    }
+
+    private func restoreInlinePlayer(
+        orientationMask: UIInterfaceOrientationMask
+    ) {
+        NSLayoutConstraint.deactivate(fullScreenConstraints)
+        fullScreenConstraints = []
+
+        if let originalPlayerSuperview {
+            originalPlayerSuperview.addSubview(self)
+            translatesAutoresizingMaskIntoConstraints =
+                originalTranslatesAutoresizingMaskIntoConstraints
+            frame = originalPlayerFrame
+            NSLayoutConstraint.activate(originalPlayerConstraints)
+        }
+
+        fullScreenPresenter?.navigationController?
+            .interactivePopGestureRecognizer?.isEnabled =
+                originalPopGestureEnabled ?? true
+        originalPlayerConstraints = []
+        fullScreenController = nil
+        fullScreenPresenter = nil
+        originalPlayerSuperview = nil
+        fullScreenPresentationState = .inline
+        shouldExitAfterPresentation = false
+        landscapeButton.isSelected = false
+        super.updateUI(isLandscape: false)
+        requestOrientation(orientationMask)
+        refreshPlayerLayout()
+        if playerLayer?.state.isPlaying == true {
+            play()
+        }
+    }
+
+    private func constraintsConnectingPlayer(
+        in superview: UIView
+    ) -> [NSLayoutConstraint] {
+        var result = superview.constraints.filter {
+            $0.firstItem === self || $0.secondItem === self
+        }
+        result.append(
+            contentsOf: constraints.filter {
+                $0.firstItem === self
+                    && ($0.firstAttribute == .width
+                        || $0.firstAttribute == .height)
+            }
+        )
+        var seen = Set<ObjectIdentifier>()
+        return result.filter {
+            seen.insert(ObjectIdentifier($0)).inserted
+        }
+    }
+
+    private func refreshPlayerLayout() {
+        superview?.setNeedsLayout()
+        superview?.layoutIfNeeded()
+        setNeedsLayout()
+        layoutIfNeeded()
+        playerLayer?.player.view?.setNeedsLayout()
+    }
+
     private func requestOrientation(_ mask: UIInterfaceOrientationMask) {
         KSOptions.supportedInterfaceOrientations = mask
         let scene = window?.windowScene
@@ -268,13 +445,6 @@ final class PicaKSPlayerView: IOSVideoPlayerView {
                 .iOS(interfaceOrientations: mask)
             )
         } else {
-            let orientation: UIInterfaceOrientation = mask.contains(.landscapeRight)
-                ? .landscapeRight
-                : .portrait
-            UIDevice.current.setValue(
-                orientation.rawValue,
-                forKey: "orientation"
-            )
             UIViewController.attemptRotationToDeviceOrientation()
         }
     }
@@ -301,4 +471,23 @@ final class PicaKSPlayerView: IOSVideoPlayerView {
         4,
         5
     ]
+    private weak var originalPlayerSuperview: UIView?
+    private weak var fullScreenPresenter: UIViewController?
+    private weak var fullScreenController: PicaPlayerFullScreenViewController?
+    private var originalPlayerFrame = CGRect.zero
+    private var originalPlayerConstraints: [NSLayoutConstraint] = []
+    private var fullScreenConstraints: [NSLayoutConstraint] = []
+    private var originalOrientationMask: UIInterfaceOrientationMask?
+    private var originalPopGestureEnabled: Bool?
+    private var originalTranslatesAutoresizingMaskIntoConstraints = false
+    private var fullScreenPresentationState: FullScreenPresentationState =
+        .inline
+    private var shouldExitAfterPresentation = false
+
+    private enum FullScreenPresentationState {
+        case inline
+        case entering
+        case fullScreen
+        case exiting
+    }
 }

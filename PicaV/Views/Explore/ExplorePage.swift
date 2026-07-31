@@ -31,7 +31,7 @@ struct ExplorePage: View {
                         categories: viewModel.categories,
                         selectedID: viewModel.selectedCategoryID
                     ) { id in
-                        Task { await viewModel.selectCategory(id) }
+                        viewModel.selectCategory(id)
                     }
                 }
 
@@ -62,6 +62,12 @@ struct ExplorePage: View {
             if viewModel.isLoadingMore {
                 ProgressView()
                     .padding()
+            } else if viewModel.loadMoreErrorMessage != nil {
+                Button("重试加载更多") {
+                    Task { await viewModel.retryLoadMore() }
+                }
+                .buttonStyle(.bordered)
+                .padding()
             }
         } else {
             LoadStateView(state: viewModel.state) {
@@ -74,7 +80,7 @@ struct ExplorePage: View {
         Binding(
             get: { viewModel.sort },
             set: { value in
-                Task { await viewModel.selectSort(value) }
+                viewModel.selectSort(value)
             }
         )
     }

@@ -25,6 +25,7 @@ final class HomeSectionMoreViewModel: ObservableObject {
     @Published private(set) var items: [Anime] = []
     @Published private(set) var hasMore = false
     @Published private(set) var isLoadingMore = false
+    @Published private(set) var loadMoreErrorMessage: String?
     @Published private(set) var sort: HomeSectionSort
 
     init(section: AnimeHomeSection, client: AnimeAPIClient) {
@@ -42,61 +43,108 @@ final class HomeSectionMoreViewModel: ObservableObject {
 
     func load(force: Bool = false) async {
         if !force, state == .loaded { return }
-        guard state != .loading else { return }
 
+        let requestID = UUID()
+        activeLoadRequestID = requestID
+        invalidateLoadMore()
+        let requestedSort = sort
         state = .loading
         do {
             let result = try await client.fetchHomeSectionMore(
                 section: section,
                 page: 1,
                 pageSize: pageSize,
-                sortType: sort.rawValue
+                sortType: requestedSort.rawValue
             )
-            guard !Task.isCancelled else { return }
-            items = result.items
+            guard !Task.isCancelled,
+                  activeLoadRequestID == requestID,
+                  sort == requestedSort else {
+                restoreStateAfterCancellation(requestID: requestID)
+                return
+            }
+            items = result.items.stableUniqued(id: \.id)
             currentPage = 1
             hasMore = result.hasMore
+            loadMoreErrorMessage = nil
             state = .loaded
         } catch is CancellationError {
-            return
+            restoreStateAfterCancellation(requestID: requestID)
         } catch {
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled,
+                  activeLoadRequestID == requestID else {
+                restoreStateAfterCancellation(requestID: requestID)
+                return
+            }
             state = .failed(error.localizedDescription)
         }
     }
 
     func loadMoreIfNeeded(currentItem: Anime) async {
-        guard currentItem.id == items.last?.id,
+        guard state == .loaded,
+              currentItem.id == items.last?.id,
               hasMore,
               !isLoadingMore else {
             return
         }
 
+        let requestID = UUID()
+        activeLoadMoreRequestID = requestID
+        let requestedSort = sort
         isLoadingMore = true
-        defer { isLoadingMore = false }
+        loadMoreErrorMessage = nil
+        defer {
+            if activeLoadMoreRequestID == requestID {
+                isLoadingMore = false
+            }
+        }
         do {
             let result = try await client.fetchHomeSectionMore(
                 section: section,
                 page: currentPage + 1,
                 pageSize: pageSize,
-                sortType: sort.rawValue
+                sortType: requestedSort.rawValue
             )
-            guard !Task.isCancelled else { return }
-            var knownIDs = Set(items.map(\.id))
+            guard !Task.isCancelled,
+                  activeLoadMoreRequestID == requestID,
+                  sort == requestedSort else {
+                return
+            }
             items.append(
-                contentsOf: result.items.filter {
-                    knownIDs.insert($0.id).inserted
-                }
+                contentsOf: result.items.stableUniqued(
+                    seededBy: Set(items.map(\.id)),
+                    id: \.id
+                )
             )
             currentPage = result.page
             hasMore = result.hasMore
+        } catch is CancellationError {
+            return
         } catch {
-            hasMore = false
+            guard activeLoadMoreRequestID == requestID else { return }
+            loadMoreErrorMessage = error.localizedDescription
         }
+    }
+
+    func retryLoadMore() async {
+        guard let item = items.last else { return }
+        await loadMoreIfNeeded(currentItem: item)
+    }
+
+    private func restoreStateAfterCancellation(requestID: UUID) {
+        guard activeLoadRequestID == requestID else { return }
+        state = items.isEmpty ? .idle : .loaded
+    }
+
+    private func invalidateLoadMore() {
+        activeLoadMoreRequestID = nil
+        isLoadingMore = false
+        loadMoreErrorMessage = nil
     }
 
     private let section: AnimeHomeSection
     private let client: AnimeAPIClient
     private let pageSize = 20
     private var currentPage = 1
+    private var activeLoadRequestID: UUID?
+    private var activeLoadMoreRequestID: UUID?
 }

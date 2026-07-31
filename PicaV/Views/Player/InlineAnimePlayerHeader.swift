@@ -17,19 +17,23 @@ struct InlineAnimePlayerHeader: View {
 
     init(
         request: InlinePlaybackRequest,
+        initialDetail: AnimeDetail? = nil,
         client: AnimeAPIClient,
         library: LibraryStore,
         downloads: VideoDownloadService,
-        isActive: Bool
+        isActive: Bool,
+        onPlaybackEnded: @escaping () -> Void = {}
     ) {
         _viewModel = StateObject(
             wrappedValue: PlayerViewModel(
                 anime: request.anime,
                 episodeID: request.episodeID,
                 episodeTitle: request.episodeTitle,
+                initialDetail: initialDetail,
                 client: client,
                 library: library,
-                downloads: downloads
+                downloads: downloads,
+                onPlaybackEnded: onPlaybackEnded
             )
         )
         self.isActive = isActive
@@ -51,6 +55,9 @@ struct InlineAnimePlayerHeader: View {
                             currentTime: currentTime,
                             totalTime: totalTime
                         )
+                    },
+                    onPlaybackEnded: {
+                        viewModel.playbackDidFinish()
                     },
                     onSourceChange: { index in
                         viewModel.selectSource(at: index)

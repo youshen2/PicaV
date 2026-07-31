@@ -6,6 +6,7 @@ final class AnimeCommentThreadViewModel: ObservableObject {
     @Published private(set) var state: LoadState
     @Published private(set) var replies: [AnimeComment]
     @Published private(set) var isLoadingMore = false
+    @Published private(set) var loadMoreErrorMessage: String?
 
     init(
         videoID: String,
@@ -21,40 +22,85 @@ final class AnimeCommentThreadViewModel: ObservableObject {
 
     func load(force: Bool = false) async {
         if !force, state == .loaded { return }
-        if replies.isEmpty {
-            state = .loading
+
+        let requestID = UUID()
+        loadRequestID = requestID
+        loadMoreRequestID = nil
+        isLoadingMore = false
+        loadMoreErrorMessage = nil
+        state = .loading
+
+        defer {
+            if loadRequestID == requestID {
+                loadRequestID = nil
+            }
         }
+
         do {
             let loaded = try await page(number: 1)
-            replies = unique(loaded)
+            guard loadRequestID == requestID else { return }
+            replies = loaded.stableUniqued { $0.id }
             currentPage = 1
             hasMore = loaded.count >= pageSize
             state = .loaded
         } catch is CancellationError {
+            guard loadRequestID == requestID else { return }
+            state = replies.isEmpty ? .idle : .loaded
             return
         } catch {
+            guard loadRequestID == requestID else { return }
             state = .failed(error.localizedDescription)
         }
     }
 
     func loadMoreIfNeeded(current reply: AnimeComment) async {
-        guard hasMore,
+        guard state == .loaded,
+              hasMore,
               !isLoadingMore,
               reply.id == replies.last?.id else {
             return
         }
+
+        await loadMore()
+    }
+
+    func retryLoadMore() async {
+        guard loadMoreErrorMessage != nil else { return }
+        await loadMore()
+    }
+
+    private func loadMore() async {
+        guard state == .loaded, hasMore, !isLoadingMore else { return }
+
+        let requestID = UUID()
+        loadMoreRequestID = requestID
         isLoadingMore = true
-        defer { isLoadingMore = false }
+        loadMoreErrorMessage = nil
+        defer {
+            if loadMoreRequestID == requestID {
+                isLoadingMore = false
+                loadMoreRequestID = nil
+            }
+        }
+
         do {
             let nextPage = currentPage + 1
             let loaded = try await page(number: nextPage)
-            replies = unique(replies + loaded)
+            guard loadMoreRequestID == requestID else { return }
+            let existingIDs = Set(replies.map(\.id))
+            replies.append(
+                contentsOf: loaded.stableUniqued(
+                    seededBy: existingIDs,
+                    id: { $0.id }
+                )
+            )
             currentPage = nextPage
             hasMore = loaded.count >= pageSize
         } catch is CancellationError {
             return
         } catch {
-            hasMore = false
+            guard loadMoreRequestID == requestID else { return }
+            loadMoreErrorMessage = error.localizedDescription
         }
     }
 
@@ -68,15 +114,12 @@ final class AnimeCommentThreadViewModel: ObservableObject {
         .filter { $0.id != rootComment.id }
     }
 
-    private func unique(_ values: [AnimeComment]) -> [AnimeComment] {
-        var seen = Set<String>()
-        return values.filter { seen.insert($0.id).inserted }
-    }
-
     private let videoID: String
     private let rootComment: AnimeComment
     private let client: AnimeAPIClient
     private let pageSize = 30
     private var currentPage = 0
     private var hasMore = true
+    private var loadRequestID: UUID?
+    private var loadMoreRequestID: UUID?
 }

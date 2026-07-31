@@ -2,3 +2,6 @@
 /AGENTS.md
 .DS_Store
 /build
+DerivedData/
+xcuserdata/
+*.xcuserstate

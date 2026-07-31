@@ -17,7 +17,9 @@ struct PicaVApp: App {
         AnimeDetailCacheService.configure()
         _settings = StateObject(wrappedValue: settings)
         _client = StateObject(wrappedValue: AnimeAPIClient(settings: settings))
-        _library = StateObject(wrappedValue: LibraryStore())
+        _library = StateObject(
+            wrappedValue: LibraryStore(platformID: settings.platformID)
+        )
         _downloads = StateObject(wrappedValue: VideoDownloadService())
     }
 

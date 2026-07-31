@@ -136,6 +136,12 @@ struct CommunityPage: View {
                     if viewModel.isLoadingMore {
                         ProgressView()
                             .padding()
+                    } else if viewModel.loadMoreErrorMessage != nil {
+                        Button("重试加载更多") {
+                            Task { await viewModel.retryLoadMore() }
+                        }
+                        .buttonStyle(.bordered)
+                        .padding()
                     }
                 }
             case .failed(let message):
@@ -155,7 +161,7 @@ struct CommunityPage: View {
         Binding(
             get: { viewModel.scope },
             set: { value in
-                Task { await viewModel.selectScope(value) }
+                viewModel.selectScope(value)
             }
         )
     }
@@ -164,7 +170,7 @@ struct CommunityPage: View {
         Binding(
             get: { viewModel.sort },
             set: { value in
-                Task { await viewModel.selectSort(value) }
+                viewModel.selectSort(value)
             }
         )
     }
