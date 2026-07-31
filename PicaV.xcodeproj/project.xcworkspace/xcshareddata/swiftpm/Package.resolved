@@ -1,5 +1,5 @@
 {
-  "originHash" : "acb133665d2c6f788337e013f765d84b5914388a89850cefa4b62ba80bc73458",
+  "originHash" : "039473393227f11968ab81eaa5048966a5ab9e15e53070be9257ed227e5a02ad",
   "pins" : [
     {
       "identity" : "ffmpegkit",
@@ -17,6 +17,15 @@
       "state" : {
         "revision" : "bdfa2da39bb18865b317c4ffd08cdef5f8efc043",
         "version" : "2.3.4"
+      }
+    },
+    {
+      "identity" : "yams",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/jpsim/Yams.git",
+      "state" : {
+        "revision" : "a27b21e0c81c5bf42049b897a62aaf387e80f279",
+        "version" : "6.2.2"
       }
     }
   ],

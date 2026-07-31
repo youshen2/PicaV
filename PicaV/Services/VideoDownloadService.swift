@@ -17,10 +17,12 @@ final class VideoDownloadService: NSObject, ObservableObject {
 
     init(
         defaults: UserDefaults = .standard,
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        proxyProtectionEnabled: Bool = false
     ) {
         self.defaults = defaults
         self.fileManager = fileManager
+        self.proxyProtectionEnabled = proxyProtectionEnabled
         fileStore = DownloadFileStore(fileManager: fileManager)
         persistence = VideoDownloadPersistence(defaults: defaults)
         progressThrottler = DownloadProgressThrottler()
@@ -132,6 +134,13 @@ final class VideoDownloadService: NSObject, ObservableObject {
 
     func resume(_ item: VideoDownloadItem) {
         guard item.status == .paused else { return }
+        guard !proxyProtectionEnabled else {
+            updateItem(item.id) {
+                $0.status = .failed
+                $0.errorMessage = Self.proxyDownloadBlockedMessage
+            }
+            return
+        }
         updateItem(item.id) {
             $0.status = .downloading
             $0.errorMessage = nil
@@ -176,6 +185,35 @@ final class VideoDownloadService: NSObject, ObservableObject {
         saveItems()
         Task(priority: .utility) {
             await fileStore.remove(localURLs)
+        }
+    }
+
+    func setProxyProtectionEnabled(_ isEnabled: Bool) {
+        guard proxyProtectionEnabled != isEnabled else { return }
+        proxyProtectionEnabled = isEnabled
+        guard isEnabled else { return }
+        enforceProxyProtection()
+    }
+
+    func enforceProxyProtection() {
+        let activeIDs = Set(
+            items.filter {
+                [.preparing, .downloading, .paused].contains($0.status)
+            }.map(\.id)
+        )
+        guard !activeIDs.isEmpty else { return }
+        for id in activeIDs {
+            progressThrottler.remove(id)
+            updateItem(id) {
+                $0.status = .failed
+                $0.errorMessage = Self.proxyDownloadBlockedMessage
+            }
+        }
+        assetSession.getAllTasks { tasks in
+            for task in tasks where
+                task.taskDescription.map(activeIDs.contains) == true {
+                task.cancel()
+            }
         }
     }
 
@@ -253,6 +291,10 @@ final class VideoDownloadService: NSObject, ObservableObject {
         episodeID: String,
         client: AnimeAPIClient
     ) async throws {
+        guard !proxyProtectionEnabled,
+              !client.isAppProxyEnabled else {
+            throw VideoDownloadError.proxyProtectionEnabled
+        }
         let sourceURL = try await client.downloadPlaybackURL(
             anime: anime,
             episodeID: episodeID
@@ -275,6 +317,19 @@ final class VideoDownloadService: NSObject, ObservableObject {
         assetSession.getAllTasks { [weak self] tasks in
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                if proxyProtectionEnabled {
+                    tasks.forEach { $0.cancel() }
+                    for item in items where
+                        [.preparing, .downloading, .paused]
+                            .contains(item.status) {
+                        updateItem(item.id) {
+                            $0.status = .failed
+                            $0.errorMessage =
+                                Self.proxyDownloadBlockedMessage
+                        }
+                    }
+                    return
+                }
                 let restoredIDs = Set(tasks.compactMap(\.taskDescription))
                 for task in tasks {
                     guard let id = task.taskDescription else { continue }
@@ -451,6 +506,7 @@ final class VideoDownloadService: NSObject, ObservableObject {
     private let fileManager: FileManager
     private let fileStore: DownloadFileStore
     private let persistence: VideoDownloadPersistence
+    private var proxyProtectionEnabled: Bool
     nonisolated private let progressThrottler: DownloadProgressThrottler
     nonisolated private let delegateEventSequencer =
         DownloadDelegateEventSequencer()
@@ -464,6 +520,8 @@ final class VideoDownloadService: NSObject, ObservableObject {
         return queue
     }()
     private static var backgroundEventsCompletionHandler: (() -> Void)?
+    private static let proxyDownloadBlockedMessage =
+        "应用代理已开启，系统后台下载无法安全接入代理，任务已停止。"
 
     private enum Keys {
         static let items = "videoDownloads.items"
@@ -527,6 +585,13 @@ extension VideoDownloadService: AVAssetDownloadDelegate {
                 guard let self,
                       let item = item(withID: id),
                       item.status != .completed else {
+                    return
+                }
+                if proxyProtectionEnabled {
+                    updateItem(id) {
+                        $0.status = .failed
+                        $0.errorMessage = Self.proxyDownloadBlockedMessage
+                    }
                     return
                 }
                 updateItem(id) {
@@ -672,8 +737,14 @@ private final class DownloadProgressThrottler: @unchecked Sendable {
 
 private enum VideoDownloadError: LocalizedError {
     case unsupportedSource
+    case proxyProtectionEnabled
 
     var errorDescription: String? {
-        "当前播放源不支持本地下载。"
+        switch self {
+        case .unsupportedSource:
+            return "当前播放源不支持本地下载。"
+        case .proxyProtectionEnabled:
+            return "应用代理已开启。系统后台下载无法安全接入进程内代理，已阻止直连下载。"
+        }
     }
 }

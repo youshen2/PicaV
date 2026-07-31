@@ -3,6 +3,8 @@ import KSPlayer
 import SwiftUI
 
 struct KSPlayerContainerView: UIViewRepresentable {
+    @EnvironmentObject private var proxyRuntime: AppProxyRuntime
+
     let sources: [PlaybackSource]
     let title: String
     let initialSourceIndex: Int
@@ -26,7 +28,7 @@ struct KSPlayerContainerView: UIViewRepresentable {
         view.backgroundColor = .black
         view.toolBar.definitionButton.accessibilityLabel = "播放线路"
         context.coordinator.attach(to: view)
-        configure(view, coordinator: context.coordinator)
+        configure(hostView, coordinator: context.coordinator)
         return hostView
     }
 
@@ -34,7 +36,7 @@ struct KSPlayerContainerView: UIViewRepresentable {
         context.coordinator.onProgress = onProgress
         context.coordinator.onPlaybackEnded = onPlaybackEnded
         context.coordinator.onSourceChange = onSourceChange
-        configure(hostView.playerView, coordinator: context.coordinator)
+        configure(hostView, coordinator: context.coordinator)
     }
 
     static func dismantleUIView(
@@ -50,10 +52,44 @@ struct KSPlayerContainerView: UIViewRepresentable {
         coordinator.resourceSignature = nil
     }
 
-    private func configure(_ view: PicaKSPlayerView, coordinator: Coordinator) {
+    private func configure(
+        _ hostView: PicaPlayerHostView,
+        coordinator: Coordinator
+    ) {
+        let view = hostView.playerView
+        let containsRemoteSource = sources.contains {
+            !$0.url.isFileURL
+        }
+        let requiresProxy =
+            containsRemoteSource && proxyRuntime.isProxyRequired
+        let mediaProxyURL = proxyRuntime.mediaProxyURL
+        if requiresProxy, mediaProxyURL == nil {
+            hostView.showStatus(proxyRuntime.mediaStatusText)
+            let blockedSignature =
+                "proxy-blocked|\(proxyRuntime.mediaStatusText)"
+            if coordinator.resourceSignature != blockedSignature {
+                view.pause()
+                view.resetPlayer()
+                coordinator.resourceSignature = blockedSignature
+            }
+            return
+        }
+        hostView.showStatus(nil)
+
+        if requiresProxy {
+            KSOptions.firstPlayerType = KSMEPlayer.self
+            KSOptions.secondPlayerType = nil
+            KSOptions.useSystemHTTPProxy = false
+        } else {
+            KSOptions.firstPlayerType = KSAVPlayer.self
+            KSOptions.secondPlayerType = KSMEPlayer.self
+            KSOptions.useSystemHTTPProxy = true
+        }
+
         let signature = sources
             .map { "\($0.id):\($0.url.absoluteString)" }
             .joined(separator: "|")
+            + "|proxy:\(mediaProxyURL?.absoluteString ?? "direct")"
         if coordinator.resourceSignature != signature {
             coordinator.resourceSignature = signature
 
@@ -63,6 +99,12 @@ struct KSPlayerContainerView: UIViewRepresentable {
                 options.isAccurateSeek = false
                 options.isSeekedAutoPlay = true
                 options.preferredForwardBufferDuration = 1.5
+                if requiresProxy, let mediaProxyURL {
+                    options.formatContextOptions["http_proxy"] =
+                        mediaProxyURL.absoluteString
+                    options.formatContextOptions["rw_timeout"] =
+                        20_000_000
+                }
                 return KSPlayerResourceDefinition(
                     url: source.url,
                     definition: source.name,
@@ -126,6 +168,7 @@ struct KSPlayerContainerView: UIViewRepresentable {
 
 final class PicaPlayerHostView: UIView {
     let playerView = PicaKSPlayerView()
+    private let statusLabel = UILabel()
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -134,11 +177,28 @@ final class PicaPlayerHostView: UIView {
 
         addSubview(playerView)
         playerView.translatesAutoresizingMaskIntoConstraints = false
+        statusLabel.translatesAutoresizingMaskIntoConstraints = false
+        statusLabel.font = .preferredFont(forTextStyle: .footnote)
+        statusLabel.textColor = .secondaryLabel
+        statusLabel.textAlignment = .center
+        statusLabel.numberOfLines = 0
+        statusLabel.isHidden = true
+        addSubview(statusLabel)
         NSLayoutConstraint.activate([
             playerView.topAnchor.constraint(equalTo: topAnchor),
             playerView.leadingAnchor.constraint(equalTo: leadingAnchor),
             playerView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            playerView.bottomAnchor.constraint(equalTo: bottomAnchor)
+            playerView.bottomAnchor.constraint(equalTo: bottomAnchor),
+            statusLabel.centerXAnchor.constraint(equalTo: centerXAnchor),
+            statusLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+            statusLabel.leadingAnchor.constraint(
+                greaterThanOrEqualTo: leadingAnchor,
+                constant: 24
+            ),
+            statusLabel.trailingAnchor.constraint(
+                lessThanOrEqualTo: trailingAnchor,
+                constant: -24
+            )
         ])
     }
 
@@ -152,6 +212,16 @@ final class PicaPlayerHostView: UIView {
         guard playerView.superview === self else { return }
         playerView.setNeedsLayout()
         playerView.playerLayer?.player.view?.setNeedsLayout()
+    }
+
+    func showStatus(_ message: String?) {
+        statusLabel.text = message
+        statusLabel.isHidden = message == nil
+        if message == nil {
+            sendSubviewToBack(statusLabel)
+        } else {
+            bringSubviewToFront(statusLabel)
+        }
     }
 }
 

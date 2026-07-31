@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A7A14F7C3F12000100000001 /* Yams in Frameworks */ = {isa = PBXBuildFile; productRef = A7A14F7C3F12000100000003 /* Yams */; };
 		B1D5A4C13EFA4A68A0010001 /* KSPlayer in Frameworks */ = {isa = PBXBuildFile; productRef = B1D5A4C13EFA4A68A0010003 /* KSPlayer */; };
 /* End PBXBuildFile section */
 
@@ -28,6 +29,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				B1D5A4C13EFA4A68A0010001 /* KSPlayer in Frameworks */,
+				A7A14F7C3F12000100000001 /* Yams in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -71,6 +73,7 @@
 			name = PicaV;
 			packageProductDependencies = (
 				B1D5A4C13EFA4A68A0010003 /* KSPlayer */,
+				A7A14F7C3F12000100000003 /* Yams */,
 			);
 			productName = PicaV;
 			productReference = 6D393B8530134AFD00C5701C /* PicaV.app */;
@@ -102,6 +105,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				B1D5A4C13EFA4A68A0010002 /* XCRemoteSwiftPackageReference "KSPlayer" */,
+				A7A14F7C3F12000100000002 /* XCRemoteSwiftPackageReference "Yams" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 6D393B8630134AFD00C5701C /* Products */;
@@ -348,6 +352,14 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
+		A7A14F7C3F12000100000002 /* XCRemoteSwiftPackageReference "Yams" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/jpsim/Yams.git";
+			requirement = {
+				kind = exactVersion;
+				version = 6.2.2;
+			};
+		};
 		B1D5A4C13EFA4A68A0010002 /* XCRemoteSwiftPackageReference "KSPlayer" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/kingslay/KSPlayer.git";
@@ -359,6 +371,11 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		A7A14F7C3F12000100000003 /* Yams */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A7A14F7C3F12000100000002 /* XCRemoteSwiftPackageReference "Yams" */;
+			productName = Yams;
+		};
 		B1D5A4C13EFA4A68A0010003 /* KSPlayer */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = B1D5A4C13EFA4A68A0010002 /* XCRemoteSwiftPackageReference "KSPlayer" */;

@@ -120,7 +120,7 @@ private enum SettingsDestination: String, CaseIterable, Identifiable {
         case .browsing: return "代理策略与重新载入"
         case .playback: return "线路偏好和自动连播"
         case .storage: return "图片缓存、收藏和观看记录"
-        case .network: return "服务器地址与 API 配置"
+        case .network: return "应用代理、服务器地址与 API 配置"
         case .about: return "应用与平台适配信息"
         }
     }

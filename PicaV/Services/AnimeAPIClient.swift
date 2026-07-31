@@ -136,6 +136,9 @@ final class AnimeAPIClient: ObservableObject {
     var downloadOverCellular: Bool {
         settings.downloadOverCellular
     }
+    var isAppProxyEnabled: Bool {
+        settings.appProxyEnabled
+    }
     var detailCacheScope: String {
         let account = settings.accountSession.map {
             $0.userID ?? $0.account
@@ -149,16 +152,7 @@ final class AnimeAPIClient: ObservableObject {
 
     init(settings: AppSettings, session: URLSession? = nil) {
         self.settings = settings
-        if let session {
-            self.session = session
-        } else {
-            let configuration = URLSessionConfiguration.default
-            configuration.timeoutIntervalForRequest = 20
-            configuration.timeoutIntervalForResource = 45
-            configuration.requestCachePolicy = .returnCacheDataElseLoad
-            configuration.httpMaximumConnectionsPerHost = 6
-            self.session = URLSession(configuration: configuration)
-        }
+        injectedSession = session
     }
 
     func fetchCDNLines() async throws -> [CDNLine] {
@@ -338,6 +332,11 @@ final class AnimeAPIClient: ObservableObject {
         }
 
         let decryptionToken = settings.effectiveAccessToken
+        let session = try injectedSession
+            ?? AppNetworkSessionFactory.shared.session(
+                for: settings.appNetworkRoute(),
+                purpose: .api
+            )
         let (data, response) = try await session.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse else {
             throw AnimeAPIError.invalidResponse
@@ -658,7 +657,7 @@ final class AnimeAPIClient: ObservableObject {
     }
 
     let settings: AppSettings
-    private let session: URLSession
+    private let injectedSession: URLSession?
     private var guestSessionScope: String {
         [
             settings.platformID.rawValue,

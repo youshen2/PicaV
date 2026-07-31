@@ -10,6 +10,7 @@ struct PicaVApp: App {
     @StateObject private var client: AnimeAPIClient
     @StateObject private var library: LibraryStore
     @StateObject private var downloads: VideoDownloadService
+    @StateObject private var proxyRuntime: AppProxyRuntime
 
     init() {
         let settings = AppSettings()
@@ -20,7 +21,14 @@ struct PicaVApp: App {
         _library = StateObject(
             wrappedValue: LibraryStore(platformID: settings.platformID)
         )
-        _downloads = StateObject(wrappedValue: VideoDownloadService())
+        _downloads = StateObject(
+            wrappedValue: VideoDownloadService(
+                proxyProtectionEnabled: settings.appProxyEnabled
+            )
+        )
+        _proxyRuntime = StateObject(
+            wrappedValue: AppProxyRuntime(settings: settings)
+        )
     }
 
     var body: some Scene {
@@ -30,6 +38,7 @@ struct PicaVApp: App {
                 .environmentObject(client)
                 .environmentObject(library)
                 .environmentObject(downloads)
+                .environmentObject(proxyRuntime)
                 .tint(Color(red: 0.43, green: 0.25, blue: 0.92))
         }
     }

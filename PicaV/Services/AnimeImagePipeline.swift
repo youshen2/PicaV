@@ -10,14 +10,16 @@ final class AnimeImagePipeline {
         proxyBaseURL: URL?,
         useProxy: Bool,
         configuration: PlatformImageConfiguration,
-        maxPixelSize: CGFloat
+        maxPixelSize: CGFloat,
+        networkRoute: AppNetworkRoute
     ) async throws -> UIImage {
         let cacheKeyValue = [
             url.absoluteString,
             String(Int(maxPixelSize)),
             configuration.widthSuffix ?? "",
             configuration.xorKey ?? "",
-            configuration.fallbackHost ?? ""
+            configuration.fallbackHost ?? "",
+            networkRoute.cacheIdentity
         ].joined(separator: "|")
         let cacheKey = cacheKeyValue as NSString
         if let cached = imageCache.object(forKey: cacheKey) {
@@ -32,7 +34,8 @@ final class AnimeImagePipeline {
                 proxyBaseURL: proxyBaseURL,
                 useProxy: useProxy,
                 configuration: configuration,
-                maxPixelSize: maxPixelSize
+                maxPixelSize: maxPixelSize,
+                networkRoute: networkRoute
             )
         }
     }
@@ -43,7 +46,8 @@ final class AnimeImagePipeline {
         proxyBaseURL: URL?,
         useProxy: Bool,
         configuration: PlatformImageConfiguration,
-        maxPixelSize: CGFloat
+        maxPixelSize: CGFloat,
+        networkRoute: AppNetworkRoute
     ) async throws -> UIImage {
         try Task.checkCancellation()
         if let cached = imageCache.object(forKey: cacheKey) {
@@ -116,7 +120,10 @@ final class AnimeImagePipeline {
         for candidate in candidates {
             do {
                 try Task.checkCancellation()
-                let data = try await loadData(from: candidate)
+                let data = try await loadData(
+                    from: candidate,
+                    networkRoute: networkRoute
+                )
                 try Task.checkCancellation()
                 let decodedData = xorDecoded(data, key: configuration.xorKey)
                 if let image = decode(data: decodedData, maxPixelSize: maxPixelSize) {
@@ -164,16 +171,12 @@ final class AnimeImagePipeline {
     private init() {
         imageCache.totalCostLimit = 96 * 1_024 * 1_024
         imageCache.countLimit = 180
-
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        configuration.httpMaximumConnectionsPerHost = 3
-        configuration.timeoutIntervalForRequest = 20
-        configuration.urlCache = nil
-        session = URLSession(configuration: configuration)
     }
 
-    private func loadData(from url: URL) async throws -> Data {
+    private func loadData(
+        from url: URL,
+        networkRoute: AppNetworkRoute
+    ) async throws -> Data {
         if url.scheme?.lowercased() == "data" {
             return try inlineImageData(from: url.absoluteString)
         }
@@ -184,6 +187,10 @@ final class AnimeImagePipeline {
         )
         request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
         request.setValue("image/avif,image/webp,image/*,*/*;q=0.8", forHTTPHeaderField: "Accept")
+        let session = AppNetworkSessionFactory.shared.session(
+            for: networkRoute,
+            purpose: .image
+        )
         let (data, response) = try await session.data(for: request)
         guard let response = response as? HTTPURLResponse,
               (200...299).contains(response.statusCode) else {
@@ -326,5 +333,4 @@ final class AnimeImagePipeline {
 
     private let imageCache = NSCache<NSString, UIImage>()
     private let requestCoordinator = AnimeImageRequestCoordinator()
-    private let session: URLSession
 }

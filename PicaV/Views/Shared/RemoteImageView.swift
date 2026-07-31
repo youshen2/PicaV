@@ -53,12 +53,17 @@ struct RemoteImageView: View {
         }
         .clipped()
         .task(id: taskID) {
+            guard let networkRoute = try? settings.appNetworkRoute() else {
+                loader.reset()
+                return
+            }
             await loader.load(
                 urls: urls,
                 proxyBaseURL: settings.apiBaseURL,
                 useProxy: settings.useImageProxy,
                 configuration: settings.activePlatform.imageConfiguration,
-                maxPixelSize: maxPixelSize
+                maxPixelSize: maxPixelSize,
+                networkRoute: networkRoute
             )
         }
     }
@@ -69,7 +74,8 @@ struct RemoteImageView: View {
             String(Int(maxPixelSize)),
             String(settings.useImageProxy),
             settings.apiBaseURL.absoluteString,
-            settings.platformID.rawValue
+            settings.platformID.rawValue,
+            String(settings.appProxyRevision)
         ].joined(separator: "|")
     }
 }
@@ -84,7 +90,8 @@ private final class RemoteImageLoader: ObservableObject {
         proxyBaseURL: URL,
         useProxy: Bool,
         configuration: PlatformImageConfiguration,
-        maxPixelSize: CGFloat
+        maxPixelSize: CGFloat,
+        networkRoute: AppNetworkRoute
     ) async {
         guard !urls.isEmpty else {
             image = nil
@@ -107,7 +114,8 @@ private final class RemoteImageLoader: ObservableObject {
                     proxyBaseURL: proxyBaseURL,
                     useProxy: useProxy,
                     configuration: configuration,
-                    maxPixelSize: maxPixelSize
+                    maxPixelSize: maxPixelSize,
+                    networkRoute: networkRoute
                 )
                 guard !Task.isCancelled else { return }
                 withAnimation(.easeOut(duration: 0.18)) {
@@ -119,6 +127,12 @@ private final class RemoteImageLoader: ObservableObject {
             }
         }
         image = nil
+    }
+
+    func reset() {
+        image = nil
+        currentKey = nil
+        isLoading = false
     }
 
     private var currentKey: String?

@@ -74,6 +74,15 @@ final class AppSettings: ObservableObject {
         didSet { defaults.set(useImageProxy, forKey: Keys.useImageProxy) }
     }
 
+    @Published private(set) var appProxyEnabled: Bool
+    @Published private(set) var appProxyConfiguration: AppProxyConfiguration?
+    @Published private(set) var appNetworkRoutingMode:
+        AppNetworkRoutingMode
+    @Published private(set) var appBuiltInProxyProfiles:
+        [AppBuiltInProxyProfile]
+    @Published private(set) var selectedBuiltInProxyID: UUID?
+    @Published private(set) var appProxyRevision = 0
+
     @Published private(set) var guestSessionActive: Bool
 
     let deviceID: String
@@ -84,7 +93,7 @@ final class AppSettings: ObservableObject {
     }
 
     var contentContextIdentity: String {
-        "\(platformID.rawValue)|\(contentContextRevision)"
+        "\(platformID.rawValue)|\(contentContextRevision)|\(appProxyRevision)"
     }
 
     var effectiveAccessToken: String {
@@ -168,6 +177,29 @@ final class AppSettings: ObservableObject {
         } else {
             useImageProxy = defaults.bool(forKey: Keys.useImageProxy)
         }
+
+        appProxyConfiguration = Self.decodeProxyConfiguration(
+            defaults.data(forKey: Keys.appProxyConfiguration)
+        )
+        appBuiltInProxyProfiles =
+            AppBuiltInProxyProfileStore.decodeProfiles(
+                defaults.data(forKey: Keys.appBuiltInProxyProfiles)
+            )
+        selectedBuiltInProxyID = defaults.string(
+            forKey: Keys.selectedBuiltInProxyID
+        ).flatMap(UUID.init(uuidString:))
+        let resolvedRoutingMode: AppNetworkRoutingMode
+        if let storedMode = defaults.string(
+            forKey: Keys.appNetworkRoutingMode
+        ).flatMap(AppNetworkRoutingMode.init(rawValue:)) {
+            resolvedRoutingMode = storedMode
+        } else if defaults.bool(forKey: Keys.appProxyEnabled) {
+            resolvedRoutingMode = .proxyServer
+        } else {
+            resolvedRoutingMode = .direct
+        }
+        appNetworkRoutingMode = resolvedRoutingMode
+        appProxyEnabled = resolvedRoutingMode != .direct
 
         if let existing = defaults.string(forKey: Keys.deviceID),
            Self.isValidAcFanDeviceID(existing) {
@@ -329,6 +361,220 @@ final class AppSettings: ObservableObject {
         guestSessionActive = false
     }
 
+    func applyAppProxyConfiguration(
+        type: AppProxyProtocol,
+        host: String,
+        port: String,
+        username: String,
+        password: String
+    ) throws {
+        let (configuration, credentials) =
+            try AppProxyConfigurationParser.validated(
+                type: type,
+                host: host,
+                port: port,
+                username: username,
+                password: password
+            )
+        let credentialData = try JSONEncoder().encode(credentials)
+        guard let credentialValue = String(
+            data: credentialData,
+            encoding: .utf8
+        ) else {
+            throw KeychainStoreError.operationFailed(errSecDecode)
+        }
+        try KeychainStore.setSecure(
+            credentialValue,
+            for: Keys.appProxyCredentials
+        )
+
+        let wasUsingProxyServer =
+            appNetworkRoutingMode == .proxyServer
+        appProxyConfiguration = configuration
+        defaults.set(
+            try JSONEncoder().encode(configuration),
+            forKey: Keys.appProxyConfiguration
+        )
+        if wasUsingProxyServer {
+            appProxyDidChange()
+        } else {
+            activateRoutingMode(.proxyServer)
+        }
+    }
+
+    func disableAppProxy() {
+        activateRoutingMode(.direct)
+    }
+
+    func setNetworkRoutingMode(
+        _ mode: AppNetworkRoutingMode
+    ) throws {
+        switch mode {
+        case .direct:
+            break
+        case .proxyServer:
+            guard appProxyConfiguration != nil else {
+                throw AppProxyError.configurationMissing
+            }
+        case .builtInProxy:
+            guard let profile = selectedBuiltInProxyProfile else {
+                throw AppProxyError.builtInProfileMissing
+            }
+            _ = try AppBuiltInProxyProfileStore.secret(for: profile)
+        }
+        activateRoutingMode(mode)
+    }
+
+    @discardableResult
+    func importBuiltInProxyYAML(
+        _ yaml: String
+    ) throws -> AppBuiltInProxyImportSummary {
+        try importBuiltInProxyParseResult(
+            ClashYAMLProxyParser.parse(yaml)
+        )
+    }
+
+    @discardableResult
+    func importBuiltInProxyParseResult(
+        _ parsed: ClashYAMLProxyParser.ParseResult
+    ) throws -> AppBuiltInProxyImportSummary {
+        guard !parsed.candidates.isEmpty else {
+            throw ClashYAMLProxyParser.ParseError.noSupportedNodes(
+                parsed.skippedMessages
+            )
+        }
+        let result = try AppBuiltInProxyProfileStore.importCandidates(
+            parsed.candidates,
+            into: appBuiltInProxyProfiles,
+            defaults: defaults,
+            storageKey: Keys.appBuiltInProxyProfiles
+        )
+        appBuiltInProxyProfiles = result.profiles
+        if selectedBuiltInProxyProfile == nil {
+            selectedBuiltInProxyID = result.profiles.first?.id
+            persistSelectedBuiltInProxyID()
+        }
+        appProxyDidChange()
+        return AppBuiltInProxyImportSummary(
+            importedCount: result.importedCount,
+            replacedCount: result.replacedCount,
+            skippedMessages: parsed.skippedMessages
+        )
+    }
+
+    func selectBuiltInProxyProfile(_ id: UUID) throws {
+        guard let profile = appBuiltInProxyProfiles.first(where: {
+            $0.id == id
+        }) else {
+            throw AppProxyError.builtInProfileMissing
+        }
+        _ = try AppBuiltInProxyProfileStore.secret(for: profile)
+        let selectionChanged = selectedBuiltInProxyID != id
+        selectedBuiltInProxyID = id
+        persistSelectedBuiltInProxyID()
+        if appNetworkRoutingMode == .builtInProxy {
+            if selectionChanged {
+                appProxyDidChange()
+            }
+        } else {
+            activateRoutingMode(.builtInProxy)
+        }
+    }
+
+    func removeBuiltInProxyProfile(_ id: UUID) throws {
+        appBuiltInProxyProfiles =
+            try AppBuiltInProxyProfileStore.remove(
+                profileID: id,
+                from: appBuiltInProxyProfiles,
+                defaults: defaults,
+                storageKey: Keys.appBuiltInProxyProfiles
+            )
+        if selectedBuiltInProxyID == id {
+            selectedBuiltInProxyID = appBuiltInProxyProfiles.first?.id
+            persistSelectedBuiltInProxyID()
+        }
+        appProxyDidChange()
+    }
+
+    var selectedBuiltInProxyProfile: AppBuiltInProxyProfile? {
+        guard let selectedBuiltInProxyID else { return nil }
+        return appBuiltInProxyProfiles.first {
+            $0.id == selectedBuiltInProxyID
+        }
+    }
+
+    func appProxyCredentials() -> AppProxyCredentials {
+        guard let value = KeychainStore.string(
+            for: Keys.appProxyCredentials
+        ), let data = value.data(using: .utf8),
+        let credentials = try? JSONDecoder().decode(
+            AppProxyCredentials.self,
+            from: data
+        ) else {
+            return .empty
+        }
+        return credentials
+    }
+
+    func appNetworkRoute() throws -> AppNetworkRoute {
+        switch appNetworkRoutingMode {
+        case .direct:
+            return .direct
+        case .proxyServer:
+            return try networkRouteForProxyServer()
+        case .builtInProxy:
+            guard let profile = selectedBuiltInProxyProfile else {
+                throw AppProxyError.builtInProfileMissing
+            }
+            return .proxy(
+                .builtIn(
+                    profile: profile,
+                    secret: try AppBuiltInProxyProfileStore.secret(
+                        for: profile
+                    ),
+                    revision: appProxyRevision
+                )
+            )
+        }
+    }
+
+    func networkRouteForProxyServer() throws -> AppNetworkRoute {
+        guard let configuration = appProxyConfiguration else {
+            throw AppProxyError.configurationMissing
+        }
+        let credentials = appProxyCredentials()
+        if configuration.requiresAuthentication,
+           !credentials.isComplete {
+            throw AppProxyError.credentialsUnavailable
+        }
+        return .proxy(
+            .proxyServer(
+                configuration: configuration,
+                credentials: credentials,
+                revision: appProxyRevision
+            )
+        )
+    }
+
+    func networkRoute(
+        forBuiltInProxyProfileID id: UUID
+    ) throws -> AppNetworkRoute {
+        guard let profile = appBuiltInProxyProfiles.first(where: {
+            $0.id == id
+        }) else {
+            throw AppProxyError.builtInProfileMissing
+        }
+        return .proxy(
+            .builtIn(
+                profile: profile,
+                secret: try AppBuiltInProxyProfileStore.secret(
+                    for: profile
+                ),
+                revision: appProxyRevision
+            )
+        )
+    }
+
     private func clearServerScopedSession() {
         accessToken = ""
         accountSession = nil
@@ -353,6 +599,54 @@ final class AppSettings: ObservableObject {
     private static func decodeSession(_ data: Data?) -> PlatformAccountSession? {
         guard let data else { return nil }
         return try? JSONDecoder().decode(PlatformAccountSession.self, from: data)
+    }
+
+    private static func decodeProxyConfiguration(
+        _ data: Data?
+    ) -> AppProxyConfiguration? {
+        guard let data else { return nil }
+        return try? JSONDecoder().decode(
+            AppProxyConfiguration.self,
+            from: data
+        )
+    }
+
+    private func appProxyDidChange() {
+        appProxyRevision &+= 1
+        AppNetworkSessionFactory.shared.reset()
+    }
+
+    private func activateRoutingMode(
+        _ mode: AppNetworkRoutingMode
+    ) {
+        guard mode != appNetworkRoutingMode
+                || appProxyEnabled != (mode != .direct) else {
+            return
+        }
+        appNetworkRoutingMode = mode
+        appProxyEnabled = mode != .direct
+        defaults.set(
+            mode.rawValue,
+            forKey: Keys.appNetworkRoutingMode
+        )
+        defaults.set(
+            appProxyEnabled,
+            forKey: Keys.appProxyEnabled
+        )
+        appProxyDidChange()
+    }
+
+    private func persistSelectedBuiltInProxyID() {
+        if let selectedBuiltInProxyID {
+            defaults.set(
+                selectedBuiltInProxyID.uuidString,
+                forKey: Keys.selectedBuiltInProxyID
+            )
+        } else {
+            defaults.removeObject(
+                forKey: Keys.selectedBuiltInProxyID
+            )
+        }
     }
 
     private static func platformSettings(
@@ -449,6 +743,14 @@ final class AppSettings: ObservableObject {
         static let autoplayNextEpisode = "player.autoplayNextEpisode"
         static let downloadOverCellular = "downloads.allowsCellular"
         static let useImageProxy = "image.useProxy"
+        static let appProxyEnabled = "network.appProxy.enabled"
+        static let appProxyConfiguration = "network.appProxy.configuration"
+        static let appProxyCredentials = "network.appProxy.credentials"
+        static let appNetworkRoutingMode = "network.routing.mode"
+        static let appBuiltInProxyProfiles =
+            "network.builtInProxy.profiles"
+        static let selectedBuiltInProxyID =
+            "network.builtInProxy.selectedID"
         static let deviceID = "device.id"
 
         static let legacyBaseURL = "server.baseURL"

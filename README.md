@@ -85,6 +85,31 @@ iOS 18 及以上会使用 `matchedTransitionSource` 与
 - 平台、账号、网络、播放、浏览、存储和关于页面相互独立。
 - 服务地址、API 前缀、账号会话、图片域、CDN 线路和本地数据均按平台隔离。
 
+### 应用代理
+
+- 参考 [AzumaChiaki/alens](https://github.com/AzumaChiaki/alens) 的进程内代理架构，
+  明确提供“直连”“代理服务器”“内置代理”三种互斥路由。
+- “代理服务器”用于手动配置已有的 HTTP、HTTPS 或 SOCKS5 服务；“内置代理”
+  使用 Yams 在本机解析 Clash YAML，管理 HTTP、SOCKS5、Shadowsocks、VMess
+  与 Trojan 节点。
+- Clash YAML 可从文件、粘贴文本或 HTTPS 订阅链接导入；订阅可选择直连、
+  经手动代理服务器或经任一已导入节点获取。订阅链接不持久化，响应限制为 5 MB，
+  且拒绝降级到 HTTP 的重定向。
+- Shadowsocks 支持 `aes-128-gcm`、`aes-256-gcm` 和
+  `chacha20-ietf-poly1305`；VMess 支持 `alterId=0` 的 AEAD TCP；Trojan
+  支持 TCP + TLS。暂不支持的 WS、gRPC、插件与 VMess TLS 节点会在导入报告中跳过。
+- API、登录和图片请求通过应用自有 `URLProtocol` 隧道转发；HTTPS 目标会在隧道内
+  通过仅监听 loopback 的桥接交给 `Network.framework` 完成 TLS 1.2/1.3
+  握手与真实目标域名的证书校验。
+- 在线播放使用仅监听 loopback、带随机临时凭据的本地桥接，再交给 FFmpeg 的
+  `http_proxy` 接口；代理变化时会自动重建播放资源。
+- 代理开启后采用 fail-closed 策略：配置、凭据、握手或节点连接失败时中断请求，
+  不会回退直连。
+- 代理服务器凭据以及 YAML 节点的密码、UUID 等密钥保存在 Keychain；下载后的
+  YAML 只在本机解析。
+- 系统后台 HLS 下载无法可靠接入进程内隧道，因此代理开启期间会停止并阻止后台
+  下载；已完成的本地内容仍可离线播放。
+
 ## 当前平台
 
 | 平台 | 默认服务地址 | API 前缀 | 状态 |
@@ -126,6 +151,8 @@ PlatformRequest / AnimeMapper / CommunityMapper
 - `LibraryStore` 维护本地收藏、历史和播放进度。
 - `AnimeImageCacheService` 与 `AnimeDetailCacheService` 负责经过校验的安全缓存。
 - `VideoDownloadService` 管理系统 HLS 后台下载任务和离线资源。
+- `AppNetworkSessionFactory`、`AppProxyURLProtocol` 与
+  `AppMediaProxyBridge` 分别管理受保护会话、应用内 HTTP(S) 请求和在线播放桥接。
 
 ### 添加新平台
 

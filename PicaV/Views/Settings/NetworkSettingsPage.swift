@@ -9,6 +9,26 @@ struct NetworkSettingsPage: View {
     var body: some View {
         Form {
             Section(
+                header: Text("应用代理"),
+                footer: Text(
+                    "可分别配置外部代理服务器，或导入 Clash YAML 使用应用内置代理。"
+                )
+            ) {
+                NavigationLink {
+                    AppProxySettingsPage()
+                } label: {
+                    HStack {
+                        Label("代理配置", systemImage: "lock.shield")
+                        Spacer()
+                        Text(
+                            settings.appNetworkRoutingMode.displayName
+                        )
+                        .foregroundColor(.secondary)
+                    }
+                }
+            }
+
+            Section(
                 header: Text(settings.activePlatform.displayName),
                 footer: Text(
                     "编辑完成后点按“应用配置”。切换服务器会清除当前登录与线路信息，"

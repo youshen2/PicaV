@@ -1,0 +1,226 @@
+import SwiftUI
+
+struct AppProxySettingsPage: View {
+    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var proxyRuntime: AppProxyRuntime
+
+    @State private var feedback: Feedback?
+    @State private var isTesting = false
+    @State private var confirmingDirect = false
+
+    var body: some View {
+        Form {
+            Section(
+                header: Text("当前路由"),
+                footer: Text(
+                    settings.appProxyEnabled
+                        ? "代理不可用时会中断请求，不会静默回退直连。"
+                        : "当前请求不经过任何应用代理。"
+                )
+            ) {
+                SettingsValueRow(
+                    title: "方式",
+                    value: settings.appNetworkRoutingMode.displayName
+                )
+                SettingsValueRow(
+                    title: "在线播放",
+                    value: proxyRuntime.mediaStatusText
+                )
+            }
+
+            Section(
+                header: Text("请求方式"),
+                footer: Text(
+                    "“代理服务器”只转发给外部 HTTP/HTTPS/SOCKS5 服务；"
+                        + "“内置代理”读取 Clash YAML，由应用自己完成节点协议握手。"
+                )
+            ) {
+                ForEach(AppNetworkRoutingMode.allCases) { mode in
+                    routeButton(mode)
+                }
+            }
+
+            Section(
+                header: Text("配置"),
+                footer: Text(
+                    "两套配置彼此独立。保存代理服务器不会修改已导入的 YAML 节点。"
+                )
+            ) {
+                NavigationLink {
+                    ProxyServerSettingsPage()
+                } label: {
+                    configurationRow(
+                        title: "代理服务器",
+                        systemImage: "server.rack",
+                        value: proxyServerSummary
+                    )
+                }
+
+                NavigationLink {
+                    BuiltInProxySettingsPage()
+                } label: {
+                    configurationRow(
+                        title: "内置代理",
+                        systemImage: "shippingbox",
+                        value: builtInProxySummary
+                    )
+                }
+            }
+
+            Section {
+                Button {
+                    Task { await testCurrentRoute() }
+                } label: {
+                    if isTesting {
+                        HStack {
+                            ProgressView()
+                            Text("正在测试当前路由")
+                        }
+                    } else {
+                        Text("测试当前路由")
+                    }
+                }
+                .disabled(!settings.appProxyEnabled || isTesting)
+            }
+
+            if let feedback {
+                Section("结果") {
+                    Label(
+                        feedback.message,
+                        systemImage: feedback.isError
+                            ? "exclamationmark.triangle"
+                            : "checkmark.circle"
+                    )
+                    .foregroundColor(
+                        feedback.isError ? .red : .green
+                    )
+                }
+            }
+
+            Section(
+                header: Text("流量范围"),
+                footer: Text(
+                    "API、图片与在线播放会使用所选路由。系统后台下载无法安全接入进程内隧道，"
+                        + "使用任一代理时会被阻止；本地内容不受影响。"
+                )
+            ) {
+                SettingsValueRow(title: "API 与登录", value: "受保护")
+                SettingsValueRow(title: "图片", value: "受保护")
+                SettingsValueRow(title: "在线播放", value: "受保护")
+                SettingsValueRow(title: "后台下载", value: "代理时停用")
+            }
+        }
+        .navigationTitle("应用代理")
+        .navigationBarTitleDisplayMode(.inline)
+        .alert("切换为直连？", isPresented: $confirmingDirect) {
+            Button("取消", role: .cancel) {}
+            Button("改用直连", role: .destructive) {
+                applyMode(.direct)
+            }
+        } message: {
+            Text(
+                "切换后，平台与图片服务器将能看到你的真实出口 IP。"
+            )
+        }
+    }
+
+    private func routeButton(
+        _ mode: AppNetworkRoutingMode
+    ) -> some View {
+        Button {
+            if mode == .direct, settings.appProxyEnabled {
+                confirmingDirect = true
+            } else {
+                applyMode(mode)
+            }
+        } label: {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(mode.displayName)
+                        .foregroundColor(.primary)
+                    Text(mode.explanation)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+                if settings.appNetworkRoutingMode == mode {
+                    Image(systemName: "checkmark")
+                        .foregroundColor(.accentColor)
+                        .accessibilityLabel("已选择")
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func configurationRow(
+        title: String,
+        systemImage: String,
+        value: String
+    ) -> some View {
+        HStack {
+            Label(title, systemImage: systemImage)
+            Spacer()
+            Text(value)
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+        }
+    }
+
+    private var proxyServerSummary: String {
+        guard let configuration = settings.appProxyConfiguration else {
+            return "未配置"
+        }
+        return "\(configuration.type.displayName) · \(configuration.displayAddress)"
+    }
+
+    private var builtInProxySummary: String {
+        if let profile = settings.selectedBuiltInProxyProfile {
+            return profile.name
+        }
+        let count = settings.appBuiltInProxyProfiles.count
+        return count == 0 ? "未导入" : "\(count) 个节点"
+    }
+
+    private func applyMode(_ mode: AppNetworkRoutingMode) {
+        do {
+            try settings.setNetworkRoutingMode(mode)
+            feedback = Feedback(
+                message: "已切换为\(mode.displayName)。",
+                isError: false
+            )
+        } catch {
+            feedback = Feedback(
+                message: error.localizedDescription,
+                isError: true
+            )
+        }
+    }
+
+    private func testCurrentRoute() async {
+        isTesting = true
+        feedback = nil
+        defer { isTesting = false }
+        do {
+            let statusCode = try await AppProxyConnectionTester.test(
+                route: settings.appNetworkRoute(),
+                targetURL: settings.rootURL
+            )
+            feedback = Feedback(
+                message: "连接成功（HTTP \(statusCode)）。",
+                isError: false
+            )
+        } catch {
+            feedback = Feedback(
+                message: error.localizedDescription,
+                isError: true
+            )
+        }
+    }
+
+    private struct Feedback {
+        let message: String
+        let isError: Bool
+    }
+}
