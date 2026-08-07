@@ -1,10 +1,5 @@
 import SwiftUI
 
-enum VideoDownloadListScope: Equatable {
-    case all
-    case cached
-}
-
 struct VideoDownloadListPage: View {
     @EnvironmentObject private var downloads: VideoDownloadService
     @EnvironmentObject private var library: LibraryStore
@@ -13,33 +8,18 @@ struct VideoDownloadListPage: View {
     @State private var playbackErrorMessage: String?
 
     let client: AnimeAPIClient
-    let scope: VideoDownloadListScope
-
-    init(
-        client: AnimeAPIClient,
-        scope: VideoDownloadListScope = .all
-    ) {
-        self.client = client
-        self.scope = scope
-    }
 
     var body: some View {
         Group {
             if visibleItemsAreEmpty {
                 EmptyStateView(
-                    systemImage: scope == .cached
-                        ? "tray"
-                        : "arrow.down.circle",
-                    title: scope == .cached
-                        ? "还没有已缓存视频"
-                        : "还没有下载视频",
-                    message: scope == .cached
-                        ? "下载完成的剧集会集中显示在这里。"
-                        : "在番剧详情页点按下载按钮，选择要离线观看的剧集。"
+                    systemImage: "arrow.down.circle",
+                    title: "还没有下载视频",
+                    message: "在番剧详情页点按下载按钮，选择要离线观看的剧集。"
                 )
             } else {
                 List {
-                    if scope == .all, !activeItems.isEmpty {
+                    if !activeItems.isEmpty {
                         Section("下载任务") {
                             ForEach(activeItems) { item in
                                 VideoDownloadRow(item: item)
@@ -54,7 +34,7 @@ struct VideoDownloadListPage: View {
                     }
 
                     if !completedItems.isEmpty {
-                        Section(scope == .cached ? "离线内容" : "已下载") {
+                        Section("已下载") {
                             ForEach(completedItems) { item in
                                 downloadButton(item)
                                     .swipeActions(edge: .trailing) {
@@ -71,7 +51,7 @@ struct VideoDownloadListPage: View {
         .overlay(alignment: .topLeading) {
             downloadedPlayerPresenter
         }
-        .navigationTitle(scope == .cached ? "已缓存" : "下载视频")
+        .navigationTitle("下载视频")
         .navigationBarTitleDisplayMode(.inline)
         .picaVHidesTabBar()
         .toolbar {
@@ -101,9 +81,7 @@ struct VideoDownloadListPage: View {
     }
 
     private var visibleItemsAreEmpty: Bool {
-        scope == .cached
-            ? completedItems.isEmpty
-            : downloads.items.isEmpty
+        downloads.items.isEmpty
     }
 
     private var activeItems: [VideoDownloadItem] {

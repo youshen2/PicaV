@@ -62,25 +62,12 @@ struct MyPage: View {
             }
 
             NavigationLink {
-                VideoDownloadListPage(
-                    client: client,
-                    scope: .cached
-                )
-            } label: {
-                contentRow(
-                    title: "已缓存",
-                    systemImage: "tray.full",
-                    count: cachedCount
-                )
-            }
-
-            NavigationLink {
                 VideoDownloadListPage(client: client)
             } label: {
                 contentRow(
                     title: "下载管理",
                     systemImage: "arrow.down.circle",
-                    count: activeDownloadCount
+                    count: downloads.items.count
                 )
             }
         }
@@ -121,13 +108,5 @@ struct MyPage: View {
         settings.isAccountLoggedIn
             ? settings.activePlatform.displayName
             : "登录 \(settings.activePlatform.displayName) 账号"
-    }
-
-    private var cachedCount: Int {
-        downloads.items.filter { $0.status == .completed }.count
-    }
-
-    private var activeDownloadCount: Int {
-        downloads.items.filter { $0.status != .completed }.count
     }
 }
