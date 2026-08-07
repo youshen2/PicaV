@@ -21,9 +21,11 @@ final class VideoDownloadService: NSObject, ObservableObject {
         proxyProtectionEnabled: Bool = false
     ) {
         self.defaults = defaults
-        self.fileManager = fileManager
         self.proxyProtectionEnabled = proxyProtectionEnabled
         fileStore = DownloadFileStore(fileManager: fileManager)
+        localFileResolver = VideoDownloadLocalFileResolver(
+            fileManager: fileManager
+        )
         persistence = VideoDownloadPersistence(defaults: defaults)
         progressThrottler = DownloadProgressThrottler()
         items = Self.loadItems(defaults: defaults)
@@ -36,7 +38,7 @@ final class VideoDownloadService: NSObject, ObservableObject {
         }
         _ = assetSession
         restoreSystemTasks()
-        validateCompletedItems()
+        migrateCompletedItemPaths()
     }
 
     func enqueue(
@@ -254,7 +256,6 @@ final class VideoDownloadService: NSObject, ObservableObject {
         guard let localURL = localURL(for: currentItem) else {
             updateItem(currentItem.id) {
                 $0.status = .failed
-                $0.localPath = nil
                 $0.errorMessage = "本地视频文件已不存在，请重新下载。"
             }
             return nil
@@ -371,15 +372,24 @@ final class VideoDownloadService: NSObject, ObservableObject {
         }
     }
 
-    private func validateCompletedItems() {
-        for item in items where item.status == .completed {
-            guard localURL(for: item) == nil else { continue }
-            updateItem(item.id) {
-                $0.status = .failed
-                $0.localPath = nil
-                $0.errorMessage = "本地文件已不存在，请重新下载。"
+    private func migrateCompletedItemPaths() {
+        var didChange = false
+
+        for index in items.indices where
+            items[index].status == .completed {
+            guard let localURL = localURL(for: items[index]) else {
+                continue
+            }
+            let stablePath = VideoDownloadLocalFileResolver
+                .persistedPath(for: localURL)
+            if items[index].localPath != stablePath {
+                items[index].localPath = stablePath
+                didChange = true
             }
         }
+
+        guard didChange else { return }
+        saveItems()
     }
 
     private func systemTask(for itemID: String) async -> URLSessionTask? {
@@ -473,22 +483,7 @@ final class VideoDownloadService: NSObject, ObservableObject {
 
     private func localURL(for item: VideoDownloadItem) -> URL? {
         guard let path = item.localPath, !path.isEmpty else { return nil }
-        let url: URL
-        if path.hasPrefix("/") {
-            url = URL(fileURLWithPath: path)
-        } else {
-            url = URL(fileURLWithPath: NSHomeDirectory())
-                .appendingPathComponent(path)
-        }
-        return fileManager.fileExists(atPath: url.path) ? url : nil
-    }
-
-    private nonisolated static func persistedPath(for url: URL) -> String {
-        let homePath = URL(fileURLWithPath: NSHomeDirectory())
-            .standardizedFileURL.path
-        let path = url.standardizedFileURL.path
-        guard path.hasPrefix(homePath + "/") else { return path }
-        return String(path.dropFirst(homePath.count + 1))
+        return localFileResolver.existingURL(for: path)
     }
 
     private static func loadItems(
@@ -519,8 +514,8 @@ final class VideoDownloadService: NSObject, ObservableObject {
     }()
 
     private let defaults: UserDefaults
-    private let fileManager: FileManager
     private let fileStore: DownloadFileStore
+    private let localFileResolver: VideoDownloadLocalFileResolver
     private let persistence: VideoDownloadPersistence
     private var proxyProtectionEnabled: Bool
     nonisolated private let progressThrottler: DownloadProgressThrottler
@@ -575,7 +570,9 @@ extension VideoDownloadService: AVAssetDownloadDelegate {
     ) {
         guard let id = assetDownloadTask.taskDescription else { return }
         progressThrottler.remove(id)
-        let path = Self.persistedPath(for: location)
+        let path = VideoDownloadLocalFileResolver.persistedPath(
+            for: location
+        )
         delegateEventSequencer.enqueue { [weak self] in
             await MainActor.run { [weak self] in
                 self?.updateItem(id) {
