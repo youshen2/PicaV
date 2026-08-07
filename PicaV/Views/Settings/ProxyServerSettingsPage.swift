@@ -17,8 +17,7 @@ struct ProxyServerSettingsPage: View {
             Section(
                 header: Text("外部代理服务器"),
                 footer: Text(
-                    "此处仅配置现成的 HTTP、HTTPS 或 SOCKS5 代理服务器，"
-                        + "不会读取 Clash YAML，也不会实现 SS、VMess 或 Trojan。"
+                    "此处仅配置现成的 HTTP、HTTPS 或 SOCKS5 代理服务器。"
                 )
             ) {
                 Picker("协议", selection: $proxyType) {

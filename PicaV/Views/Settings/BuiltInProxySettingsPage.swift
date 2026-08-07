@@ -109,17 +109,6 @@ struct BuiltInProxySettingsPage: View {
                     )
                 }
             }
-
-            Section(
-                header: Text("当前限制"),
-                footer: Text(
-                    "WS、gRPC、HTTP/2、Shadowsocks 插件、VMess TLS 与非零 alterId "
-                        + "会在导入报告中明确跳过，避免生成无法连接的假节点。"
-                )
-            ) {
-                SettingsValueRow(title: "传输", value: "TCP")
-                SettingsValueRow(title: "代理目标", value: "HTTP / HTTPS")
-            }
         }
         .navigationTitle("内置代理")
         .navigationBarTitleDisplayMode(.inline)

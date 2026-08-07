@@ -3,7 +3,7 @@ import Foundation
 struct AcFanPlatformAdapter: AnimePlatformAdapter {
     let id = AnimePlatformID.acFan
     let displayName = "AcFan"
-    let defaultBaseURL = "https://afsdas1234.5237cs3m.work"
+    let defaultBaseURL = "https://jhg001ach5.dpztxquz.work"
     let defaultAPIPrefix = "/api"
     let appVersion = "1.9.6"
     let userMark = "xhp"
@@ -468,4 +468,3 @@ struct AcFanPlatformAdapter: AnimePlatformAdapter {
         return PlatformRequest(path: "m3u8/h5/decode", query: ["path": path])
     }
 }
-

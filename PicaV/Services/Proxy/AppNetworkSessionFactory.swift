@@ -6,6 +6,7 @@ enum AppNetworkPurpose: Hashable {
     case image
     case probe
     case subscription
+    case addressDiscovery
 }
 
 final class AppProxyRouteRegistry {
@@ -88,7 +89,7 @@ final class AppNetworkSessionFactory {
             configuration.timeoutIntervalForRequest = 25
             configuration.timeoutIntervalForResource = 60
             configuration.urlCache = nil
-        case .probe, .subscription:
+        case .probe, .subscription, .addressDiscovery:
             configuration = .ephemeral
             configuration.requestCachePolicy =
                 .reloadIgnoringLocalCacheData
@@ -97,7 +98,7 @@ final class AppNetworkSessionFactory {
             configuration.timeoutIntervalForResource = 30
             configuration.urlCache = nil
         }
-        if purpose == .subscription {
+        if purpose == .subscription || purpose == .addressDiscovery {
             configuration.httpShouldSetCookies = false
             configuration.httpCookieStorage = nil
             configuration.urlCredentialStorage = nil
