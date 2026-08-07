@@ -61,7 +61,8 @@ struct InlineAnimePlayerHeader: View {
                     },
                     onSourceChange: { index in
                         viewModel.selectSource(at: index)
-                    }
+                    },
+                    onFullScreenChange: { _ in }
                 )
             } else {
                 placeholder

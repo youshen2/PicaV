@@ -13,12 +13,14 @@ struct KSPlayerContainerView: UIViewRepresentable {
     let onProgress: (TimeInterval, TimeInterval) -> Void
     let onPlaybackEnded: () -> Void
     let onSourceChange: (Int) -> Void
+    let onFullScreenChange: (Bool) -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
             onProgress: onProgress,
             onPlaybackEnded: onPlaybackEnded,
-            onSourceChange: onSourceChange
+            onSourceChange: onSourceChange,
+            onFullScreenChange: onFullScreenChange
         )
     }
 
@@ -36,6 +38,7 @@ struct KSPlayerContainerView: UIViewRepresentable {
         context.coordinator.onProgress = onProgress
         context.coordinator.onPlaybackEnded = onPlaybackEnded
         context.coordinator.onSourceChange = onSourceChange
+        context.coordinator.onFullScreenChange = onFullScreenChange
         configure(hostView, coordinator: context.coordinator)
     }
 
@@ -138,17 +141,20 @@ struct KSPlayerContainerView: UIViewRepresentable {
         var onProgress: (TimeInterval, TimeInterval) -> Void
         var onPlaybackEnded: () -> Void
         var onSourceChange: (Int) -> Void
+        var onFullScreenChange: (Bool) -> Void
         var resourceSignature: String?
         var wasActive: Bool?
 
         init(
             onProgress: @escaping (TimeInterval, TimeInterval) -> Void,
             onPlaybackEnded: @escaping () -> Void,
-            onSourceChange: @escaping (Int) -> Void
+            onSourceChange: @escaping (Int) -> Void,
+            onFullScreenChange: @escaping (Bool) -> Void
         ) {
             self.onProgress = onProgress
             self.onPlaybackEnded = onPlaybackEnded
             self.onSourceChange = onSourceChange
+            self.onFullScreenChange = onFullScreenChange
         }
 
         func attach(to view: PicaKSPlayerView) {
@@ -160,6 +166,9 @@ struct KSPlayerContainerView: UIViewRepresentable {
             }
             view.sourceDidChange = { [weak self] index in
                 self?.onSourceChange(index)
+            }
+            view.fullScreenDidChange = { [weak self] isFullScreen in
+                self?.onFullScreenChange(isFullScreen)
             }
             view.backBlock = {}
         }
@@ -228,6 +237,7 @@ final class PicaPlayerHostView: UIView {
 final class PicaKSPlayerView: IOSVideoPlayerView {
     var playbackDidFinish: (() -> Void)?
     var sourceDidChange: ((Int) -> Void)?
+    var fullScreenDidChange: ((Bool) -> Void)?
 
     override func player(layer: KSPlayerLayer, state: KSPlayerState) {
         super.player(layer: layer, state: state)
@@ -269,8 +279,10 @@ final class PicaKSPlayerView: IOSVideoPlayerView {
         if isFullScreen {
             guard fullScreenPresentationState == .inline else { return }
             fullScreenPresentationState = .entering
+            fullScreenDidChange?(true)
             if !enterFullScreen() {
                 fullScreenPresentationState = .inline
+                fullScreenDidChange?(false)
             }
         } else {
             switch fullScreenPresentationState {
@@ -467,6 +479,7 @@ final class PicaKSPlayerView: IOSVideoPlayerView {
         shouldExitAfterPresentation = false
         landscapeButton.isSelected = false
         super.updateUI(isLandscape: false)
+        fullScreenDidChange?(false)
         requestOrientation(orientationMask)
         refreshPlayerLayout()
         if playerLayer?.state.isPlaying == true {

@@ -84,6 +84,7 @@ struct CommunityPostViewCount: View {
         Text("\(CommunityCountFormatter.display(viewCount)) 次浏览")
             .font(.caption)
             .foregroundColor(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

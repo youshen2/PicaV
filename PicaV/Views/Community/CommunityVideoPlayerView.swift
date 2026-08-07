@@ -6,6 +6,7 @@ struct CommunityVideoPlayerView: View {
     @State private var playbackURL: URL?
     @State private var hasStarted = false
     @State private var isVisible = false
+    @State private var isFullScreen = false
     @State private var errorMessage: String?
 
     let postID: String
@@ -32,7 +33,10 @@ struct CommunityVideoPlayerView: View {
                     isActive: isVisible && coordinator.activePostID == postID,
                     onProgress: { _, _ in },
                     onPlaybackEnded: {},
-                    onSourceChange: { _ in }
+                    onSourceChange: { _ in },
+                    onFullScreenChange: { isFullScreen in
+                        self.isFullScreen = isFullScreen
+                    }
                 )
             } else {
                 RemoteImageView(
@@ -65,6 +69,7 @@ struct CommunityVideoPlayerView: View {
             isVisible = true
         }
         .onDisappear {
+            guard !isFullScreen else { return }
             isVisible = false
             if coordinator.activePostID == postID {
                 coordinator.activePostID = nil
