@@ -279,10 +279,8 @@ final class AnimeAPIClient: ObservableObject {
             rememberImageDomain(from: payload)
             return payload
         } catch AnimeAPIError.server(let code, _)
-            where [1001, 1003].contains(code)
-                && settings.accessToken.isEmpty
-                && settings.guestSessionActive {
-            settings.invalidateGuestSession()
+            where [1001, 1003].contains(code) {
+            settings.invalidateExpiredSession()
             let payload = try await send(specification)
             rememberImageDomain(from: payload)
             return payload
@@ -291,7 +289,8 @@ final class AnimeAPIClient: ObservableObject {
 
     private func send(
         _ specification: PlatformRequest,
-        travelerKey: String? = nil
+        travelerKey: String? = nil,
+        allowsTokenRefresh: Bool = true
     ) async throws -> ServerPayload {
         if specification.requiresAuthentication {
             try await ensureAuthenticated()
@@ -340,6 +339,24 @@ final class AnimeAPIClient: ObservableObject {
         let (data, response) = try await session.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse else {
             throw AnimeAPIError.invalidResponse
+        }
+        if httpResponse.statusCode == 301,
+           let refreshedToken = httpResponse.value(
+               forHTTPHeaderField: "refresh-authorization"
+           )?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !refreshedToken.isEmpty {
+            settings.setRefreshedSessionToken(refreshedToken)
+            guard allowsTokenRefresh else {
+                throw AnimeAPIError.httpStatus(
+                    httpResponse.statusCode,
+                    message: "会话刷新后请求仍未成功，请重试。"
+                )
+            }
+            return try await send(
+                specification,
+                travelerKey: travelerKey,
+                allowsTokenRefresh: false
+            )
         }
         return try await AnimeResponseParser.parse(
             data: data,

@@ -1,44 +1,31 @@
-import AVFoundation
 import Combine
 import Foundation
 
 @MainActor
-final class VideoDownloadService: NSObject, ObservableObject {
-    static let backgroundSessionIdentifier =
-        "work.picav.video-downloads"
-
+final class VideoDownloadService: ObservableObject {
     @Published private(set) var items: [VideoDownloadItem]
-
-    static func setBackgroundEventsCompletionHandler(
-        _ completionHandler: @escaping () -> Void
-    ) {
-        backgroundEventsCompletionHandler = completionHandler
-    }
 
     init(
         defaults: UserDefaults = .standard,
         fileManager: FileManager = .default,
-        proxyProtectionEnabled: Bool = false
+        proxyRuntime: AppProxyRuntime? = nil
     ) {
         self.defaults = defaults
-        self.proxyProtectionEnabled = proxyProtectionEnabled
-        fileStore = DownloadFileStore(fileManager: fileManager)
+        self.proxyRuntime = proxyRuntime
+        fileStore = VideoDownloadFileStore(fileManager: fileManager)
         localFileResolver = VideoDownloadLocalFileResolver(
             fileManager: fileManager
         )
         persistence = VideoDownloadPersistence(defaults: defaults)
         progressThrottler = DownloadProgressThrottler()
         items = Self.loadItems(defaults: defaults)
-        super.init()
 
         progressThrottler.setOnFlush { [weak self] updates in
             Task { @MainActor [weak self] in
                 self?.updateProgress(updates)
             }
         }
-        _ = assetSession
-        restoreSystemTasks()
-        migrateCompletedItemPaths()
+        restorePersistedItems()
     }
 
     func enqueue(
@@ -67,28 +54,12 @@ final class VideoDownloadService: NSObject, ObservableObject {
                 episodeTitle: episode.title
             )
             replaceOrInsert(item)
+            pendingJobs.append(
+                DownloadJob(item: item, client: client)
+            )
             queuedCount += 1
-
-            do {
-                try await resolveAndStart(
-                    itemID: id,
-                    anime: anime,
-                    episodeID: episode.id,
-                    client: client
-                )
-            } catch is CancellationError {
-                updateItem(id) {
-                    $0.status = .paused
-                    $0.errorMessage = nil
-                }
-                break
-            } catch {
-                updateItem(id) {
-                    $0.status = .failed
-                    $0.errorMessage = error.localizedDescription
-                }
-            }
         }
+        startPendingJobsIfNeeded()
         return queuedCount
     }
 
@@ -96,79 +67,61 @@ final class VideoDownloadService: NSObject, ObservableObject {
         _ item: VideoDownloadItem,
         client: AnimeAPIClient
     ) async {
+        guard item.status == .failed else { return }
+        if let localURL = localURL(for: item) {
+            Task(priority: .utility) {
+                await fileStore.remove([localURL])
+            }
+        }
         updateItem(item.id) {
+            $0.localPath = nil
+            $0.progress = 0
             $0.status = .preparing
             $0.errorMessage = nil
         }
-
-        do {
-            try await resolveAndStart(
-                itemID: item.id,
-                anime: item.anime,
-                episodeID: item.episodeID,
-                client: client
-            )
-        } catch is CancellationError {
-            updateItem(item.id) {
-                $0.status = .paused
-                $0.errorMessage = nil
-            }
-        } catch {
-            updateItem(item.id) {
-                $0.status = .failed
-                $0.errorMessage = error.localizedDescription
-            }
-        }
+        guard let refreshed = self.item(withID: item.id) else { return }
+        pendingJobs.removeAll { $0.item.id == item.id }
+        pendingJobs.append(
+            DownloadJob(item: refreshed, client: client)
+        )
+        startPendingJobsIfNeeded()
     }
 
     func pause(_ item: VideoDownloadItem) {
-        guard item.status == .downloading else { return }
-        progressThrottler.remove(item.id)
+        guard item.status == .downloading,
+              let worker = workers[item.id] else {
+            return
+        }
+        worker.pause()
         updateItem(item.id) {
             $0.status = .paused
             $0.errorMessage = nil
-        }
-        Task {
-            let task = await systemTask(for: item.id)
-            task?.suspend()
         }
     }
 
     func resume(_ item: VideoDownloadItem) {
         guard item.status == .paused else { return }
-        guard !proxyProtectionEnabled else {
+        guard let worker = workers[item.id] else {
             updateItem(item.id) {
                 $0.status = .failed
-                $0.errorMessage = Self.proxyDownloadBlockedMessage
+                $0.errorMessage = "下载任务已中断，请重试。"
             }
             return
         }
+        worker.resume()
         updateItem(item.id) {
             $0.status = .downloading
             $0.errorMessage = nil
-        }
-        Task {
-            if let task = await systemTask(for: item.id) {
-                task.resume()
-            } else {
-                updateItem(item.id) {
-                    $0.status = .failed
-                    $0.errorMessage = "下载任务已中断，请重试。"
-                }
-            }
         }
     }
 
     func remove(_ item: VideoDownloadItem) {
         progressThrottler.remove(item.id)
+        cancelJob(withID: item.id)
         let localURL = localURL(for: item)
         items.removeAll { $0.id == item.id }
         saveItems()
 
-        Task {
-            let task = await systemTask(for: item.id)
-            task?.cancel()
-        }
         if let localURL {
             Task(priority: .utility) {
                 await fileStore.remove([localURL])
@@ -179,43 +132,12 @@ final class VideoDownloadService: NSObject, ObservableObject {
     func clearCompleted() {
         let completed = items.filter { $0.status == .completed }
         guard !completed.isEmpty else { return }
-        let localURLs = completed.compactMap {
-            localURL(for: $0)
-        }
+        let localURLs = completed.compactMap { localURL(for: $0) }
         let completedIDs = Set(completed.map(\.id))
         items.removeAll { completedIDs.contains($0.id) }
         saveItems()
         Task(priority: .utility) {
             await fileStore.remove(localURLs)
-        }
-    }
-
-    func setProxyProtectionEnabled(_ isEnabled: Bool) {
-        guard proxyProtectionEnabled != isEnabled else { return }
-        proxyProtectionEnabled = isEnabled
-        guard isEnabled else { return }
-        enforceProxyProtection()
-    }
-
-    func enforceProxyProtection() {
-        let activeIDs = Set(
-            items.filter {
-                [.preparing, .downloading, .paused].contains($0.status)
-            }.map(\.id)
-        )
-        guard !activeIDs.isEmpty else { return }
-        for id in activeIDs {
-            progressThrottler.remove(id)
-            updateItem(id) {
-                $0.status = .failed
-                $0.errorMessage = Self.proxyDownloadBlockedMessage
-            }
-        }
-        assetSession.getAllTasks { tasks in
-            for task in tasks where
-                task.taskDescription.map(activeIDs.contains) == true {
-                task.cancel()
-            }
         }
     }
 
@@ -253,10 +175,11 @@ final class VideoDownloadService: NSObject, ObservableObject {
               currentItem.status == .completed else {
             return nil
         }
-        guard let localURL = localURL(for: currentItem) else {
+        guard let localURL = localURL(for: currentItem),
+              localURL.pathExtension.lowercased() == "mp4" else {
             updateItem(currentItem.id) {
                 $0.status = .failed
-                $0.errorMessage = "本地视频文件已不存在，请重新下载。"
+                $0.errorMessage = "本地 MP4 文件已不存在，请重新下载。"
             }
             return nil
         }
@@ -279,129 +202,180 @@ final class VideoDownloadService: NSObject, ObservableObject {
             .contains(item.status)
     }
 
-    private func startAssetDownload(
-        for item: VideoDownloadItem,
-        sourceURL: URL,
-        allowsCellularAccess: Bool
-    ) throws {
-        let asset = AVURLAsset(
-            url: sourceURL,
-            options: [
-                AVURLAssetAllowsCellularAccessKey: allowsCellularAccess
-            ]
-        )
-        guard let task = assetSession.makeAssetDownloadTask(
-            asset: asset,
-            assetTitle: "\(item.anime.title) - \(item.episodeTitle)",
-            assetArtworkData: nil,
-            options: nil
-        ) else {
-            throw VideoDownloadError.unsupportedSource
-        }
-        task.taskDescription = item.id
-        task.resume()
-    }
-
-    private func resolveAndStart(
-        itemID: String,
-        anime: Anime,
-        episodeID: String,
-        client: AnimeAPIClient
-    ) async throws {
-        guard !proxyProtectionEnabled,
-              !client.isAppProxyEnabled else {
-            throw VideoDownloadError.proxyProtectionEnabled
-        }
-        let sourceURL = try await client.downloadPlaybackURL(
-            anime: anime,
-            episodeID: episodeID
-        )
-        try Task.checkCancellation()
-        guard item(withID: itemID) != nil else { return }
-        updateItem(itemID) {
-            $0.status = .downloading
-            $0.errorMessage = nil
-        }
-        guard let refreshed = item(withID: itemID) else { return }
-        try startAssetDownload(
-            for: refreshed,
-            sourceURL: sourceURL,
-            allowsCellularAccess: client.downloadOverCellular
-        )
-    }
-
-    private func restoreSystemTasks() {
-        assetSession.getAllTasks { [weak self] tasks in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                if proxyProtectionEnabled {
-                    tasks.forEach { $0.cancel() }
-                    for item in items where
-                        [.preparing, .downloading, .paused]
-                            .contains(item.status) {
-                        updateItem(item.id) {
-                            $0.status = .failed
-                            $0.errorMessage =
-                                Self.proxyDownloadBlockedMessage
-                        }
-                    }
-                    return
-                }
-                let restoredIDs = Set(tasks.compactMap(\.taskDescription))
-                for task in tasks {
-                    guard let id = task.taskDescription else { continue }
-                    switch task.state {
-                    case .running:
-                        updateItem(id) { $0.status = .downloading }
-                    case .suspended:
-                        updateItem(id) { $0.status = .paused }
-                    default:
-                        break
-                    }
-                }
-
-                for item in items where
-                    [.preparing, .downloading, .paused].contains(item.status)
-                        && !restoredIDs.contains(item.id) {
-                    updateItem(item.id) {
-                        $0.status = .failed
-                        $0.errorMessage = "下载任务已中断，请重试。"
-                    }
-                }
+    private func startPendingJobsIfNeeded() {
+        while activeJobIDs.count < Self.maximumConcurrentDownloads,
+              !pendingJobs.isEmpty {
+            let job = pendingJobs.removeFirst()
+            guard item(withID: job.item.id) != nil else { continue }
+            activeJobIDs.insert(job.item.id)
+            jobTasks[job.item.id] = Task { [weak self] in
+                await self?.prepareAndStart(job)
             }
         }
     }
 
-    private func migrateCompletedItemPaths() {
+    private func prepareAndStart(_ job: DownloadJob) async {
+        do {
+            try await VideoDownloadNetworkPolicy.validate(
+                allowsCellular: job.client.downloadOverCellular
+            )
+            try Task.checkCancellation()
+            let sourceURL = try await job.client.downloadPlaybackURL(
+                anime: job.item.anime,
+                episodeID: job.item.episodeID
+            )
+            try Task.checkCancellation()
+            let proxyURL = try await proxyRuntime?
+                .mediaProxyURLForCurrentRoute()
+            let output = try await fileStore.prepareOutput(for: job.item)
+            try Task.checkCancellation()
+            guard item(withID: job.item.id) != nil else {
+                await fileStore.remove([
+                    output.temporaryURL,
+                    output.destinationURL
+                ])
+                finishJob(withID: job.item.id)
+                return
+            }
+
+            let id = job.item.id
+            let worker = VideoMP4DownloadWorker(
+                configuration: .init(
+                    sourceURL: sourceURL,
+                    temporaryURL: output.temporaryURL,
+                    destinationURL: output.destinationURL,
+                    proxyURL: proxyURL
+                ),
+                progress: { [weak self] progress in
+                    self?.progressThrottler.submit(progress, for: id)
+                },
+                completion: { [weak self] result in
+                    Task { @MainActor [weak self] in
+                        await self?.handleCompletion(
+                            result,
+                            output: output,
+                            itemID: id
+                        )
+                    }
+                }
+            )
+            workers[id] = worker
+            updateItem(id) {
+                $0.status = .downloading
+                $0.errorMessage = nil
+            }
+            worker.start()
+        } catch is CancellationError {
+            finishJob(withID: job.item.id)
+        } catch {
+            updateItem(job.item.id) {
+                $0.status = .failed
+                $0.errorMessage = error.localizedDescription
+            }
+            finishJob(withID: job.item.id)
+        }
+    }
+
+    private func handleCompletion(
+        _ result: Result<URL, Error>,
+        output: VideoDownloadOutput,
+        itemID: String
+    ) async {
+        progressThrottler.remove(itemID)
+        workers[itemID] = nil
+
+        switch result {
+        case .success(let url):
+            guard item(withID: itemID) != nil else {
+                await fileStore.remove([url])
+                finishJob(withID: itemID)
+                return
+            }
+            let path = VideoDownloadLocalFileResolver.persistedPath(
+                for: url
+            )
+            updateItem(itemID) {
+                $0.localPath = path
+                $0.progress = 1
+                $0.status = .completed
+                $0.errorMessage = nil
+            }
+        case .failure(let error):
+            await fileStore.remove([
+                output.temporaryURL,
+                output.destinationURL
+            ])
+            guard item(withID: itemID) != nil else {
+                finishJob(withID: itemID)
+                return
+            }
+            if error is CancellationError {
+                updateItem(itemID) {
+                    $0.status = .failed
+                    $0.errorMessage = "下载任务已取消，请重试。"
+                }
+            } else {
+                updateItem(itemID) {
+                    $0.status = .failed
+                    $0.errorMessage = error.localizedDescription
+                }
+            }
+        }
+        finishJob(withID: itemID)
+    }
+
+    private func cancelJob(withID id: String) {
+        pendingJobs.removeAll { $0.item.id == id }
+        jobTasks[id]?.cancel()
+        workers[id]?.cancel()
+        if activeJobIDs.contains(id), workers[id] == nil {
+            finishJob(withID: id)
+        }
+    }
+
+    private func finishJob(withID id: String) {
+        workers[id] = nil
+        jobTasks[id] = nil
+        activeJobIDs.remove(id)
+        startPendingJobsIfNeeded()
+    }
+
+    private func restorePersistedItems() {
         var didChange = false
-
-        for index in items.indices where
-            items[index].status == .completed {
-            guard let localURL = localURL(for: items[index]) else {
-                continue
-            }
-            let stablePath = VideoDownloadLocalFileResolver
-                .persistedPath(for: localURL)
-            if items[index].localPath != stablePath {
-                items[index].localPath = stablePath
+        for index in items.indices {
+            switch items[index].status {
+            case .preparing, .downloading, .paused:
+                items[index].status = .failed
+                items[index].errorMessage = "下载任务已中断，请重试。"
                 didChange = true
+            case .completed:
+                guard let localURL = localURL(for: items[index]) else {
+                    items[index].status = .failed
+                    items[index].errorMessage =
+                        "本地 MP4 文件已不存在，请重新下载。"
+                    didChange = true
+                    continue
+                }
+                guard localURL.pathExtension.lowercased() == "mp4" else {
+                    items[index].status = .failed
+                    items[index].errorMessage =
+                        "旧版离线包需要重新下载为 MP4。"
+                    didChange = true
+                    continue
+                }
+                let stablePath = VideoDownloadLocalFileResolver
+                    .persistedPath(for: localURL)
+                if items[index].localPath != stablePath {
+                    items[index].localPath = stablePath
+                    didChange = true
+                }
+            case .failed:
+                break
             }
         }
-
         guard didChange else { return }
+        sortItems()
         saveItems()
-    }
-
-    private func systemTask(for itemID: String) async -> URLSessionTask? {
-        await withCheckedContinuation { continuation in
-            assetSession.getAllTasks { tasks in
-                continuation.resume(
-                    returning: tasks.first {
-                        $0.taskDescription == itemID
-                    }
-                )
-            }
-        }
     }
 
     private func item(withID id: String) -> VideoDownloadItem? {
@@ -443,7 +417,6 @@ final class VideoDownloadService: NSObject, ObservableObject {
             ), updatedItems[index].status == .downloading else {
                 continue
             }
-            updatedItems[index].status = .downloading
             updatedItems[index].progress = progress
             updatedItems[index].errorMessage = nil
             didUpdate = true
@@ -499,153 +472,29 @@ final class VideoDownloadService: NSObject, ObservableObject {
         return items.sorted { $0.updatedAt > $1.updatedAt }
     }
 
-    private lazy var assetSession: AVAssetDownloadURLSession = {
-        let configuration = URLSessionConfiguration.background(
-            withIdentifier: Self.backgroundSessionIdentifier
-        )
-        configuration.allowsCellularAccess = true
-        configuration.sessionSendsLaunchEvents = true
-        configuration.isDiscretionary = false
-        return AVAssetDownloadURLSession(
-            configuration: configuration,
-            assetDownloadDelegate: self,
-            delegateQueue: delegateQueue
-        )
-    }()
+    private struct DownloadJob {
+        let item: VideoDownloadItem
+        let client: AnimeAPIClient
+    }
 
     private let defaults: UserDefaults
-    private let fileStore: DownloadFileStore
+    private let fileStore: VideoDownloadFileStore
     private let localFileResolver: VideoDownloadLocalFileResolver
     private let persistence: VideoDownloadPersistence
-    private var proxyProtectionEnabled: Bool
+    private weak var proxyRuntime: AppProxyRuntime?
     nonisolated private let progressThrottler: DownloadProgressThrottler
-    nonisolated private let delegateEventSequencer =
-        DownloadDelegateEventSequencer()
+    private var pendingJobs = [DownloadJob]()
+    private var activeJobIDs = Set<String>()
+    private var jobTasks = [String: Task<Void, Never>]()
+    private var workers = [String: VideoMP4DownloadWorker]()
     private var lastProgressPersistenceDates: [String: Date] = [:]
     private var persistenceRevision = 0
     private var lastPersistenceTask: Task<Void, Never>?
-    private let delegateQueue: OperationQueue = {
-        let queue = OperationQueue()
-        queue.name = "work.picav.video-downloads.delegate"
-        queue.maxConcurrentOperationCount = 1
-        return queue
-    }()
-    private static var backgroundEventsCompletionHandler: (() -> Void)?
-    private static let proxyDownloadBlockedMessage =
-        "应用代理已开启，系统后台下载无法安全接入代理，任务已停止。"
+    private static let maximumConcurrentDownloads = 2
 
     private enum Keys {
         static let items = "videoDownloads.items"
     }
-}
-
-extension VideoDownloadService: AVAssetDownloadDelegate {
-    nonisolated func urlSession(
-        _ session: URLSession,
-        assetDownloadTask: AVAssetDownloadTask,
-        didLoad timeRange: CMTimeRange,
-        totalTimeRangesLoaded loadedTimeRanges: [NSValue],
-        timeRangeExpectedToLoad: CMTimeRange
-    ) {
-        guard let id = assetDownloadTask.taskDescription else { return }
-        let loadedDuration = loadedTimeRanges.reduce(0.0) {
-            $0 + CMTimeGetSeconds($1.timeRangeValue.duration)
-        }
-        let expectedDuration = CMTimeGetSeconds(
-            timeRangeExpectedToLoad.duration
-        )
-        guard loadedDuration.isFinite,
-              expectedDuration.isFinite,
-              expectedDuration > 0 else {
-            return
-        }
-        let progress = min(max(loadedDuration / expectedDuration, 0), 1)
-        progressThrottler.submit(progress, for: id)
-    }
-
-    nonisolated func urlSession(
-        _ session: URLSession,
-        assetDownloadTask: AVAssetDownloadTask,
-        didFinishDownloadingTo location: URL
-    ) {
-        guard let id = assetDownloadTask.taskDescription else { return }
-        progressThrottler.remove(id)
-        let path = VideoDownloadLocalFileResolver.persistedPath(
-            for: location
-        )
-        delegateEventSequencer.enqueue { [weak self] in
-            await MainActor.run { [weak self] in
-                self?.updateItem(id) {
-                    $0.localPath = path
-                    $0.progress = 1
-                    $0.status = .completed
-                    $0.errorMessage = nil
-                }
-            }
-        }
-    }
-
-    nonisolated func urlSession(
-        _ session: URLSession,
-        task: URLSessionTask,
-        didCompleteWithError error: Error?
-    ) {
-        guard let id = task.taskDescription, let error else { return }
-        progressThrottler.remove(id)
-        let errorMessage = error.localizedDescription
-        delegateEventSequencer.enqueue { [weak self] in
-            await MainActor.run { [weak self] in
-                guard let self,
-                      let item = item(withID: id),
-                      item.status != .completed else {
-                    return
-                }
-                if proxyProtectionEnabled {
-                    updateItem(id) {
-                        $0.status = .failed
-                        $0.errorMessage = Self.proxyDownloadBlockedMessage
-                    }
-                    return
-                }
-                updateItem(id) {
-                    $0.status = .failed
-                    $0.errorMessage = errorMessage
-                }
-            }
-        }
-    }
-
-    nonisolated func urlSessionDidFinishEvents(
-        forBackgroundURLSession session: URLSession
-    ) {
-        delegateEventSequencer.enqueue { [weak self] in
-            let persistenceTask = await MainActor.run { [weak self] in
-                self?.lastPersistenceTask
-            }
-            await persistenceTask?.value
-            await MainActor.run {
-                let completionHandler =
-                    Self.backgroundEventsCompletionHandler
-                Self.backgroundEventsCompletionHandler = nil
-                completionHandler?()
-            }
-        }
-    }
-}
-
-private actor DownloadFileStore {
-    init(fileManager: FileManager) {
-        self.fileManager = fileManager
-    }
-
-    func remove(_ urls: [URL]) {
-        for url in urls {
-            guard !Task.isCancelled else { return }
-            try? fileManager.removeItem(at: url)
-        }
-    }
-
-    private let fileManager: FileManager
 }
 
 private actor VideoDownloadPersistence {
@@ -670,30 +519,8 @@ private actor VideoDownloadPersistence {
     private var latestRevision = 0
 }
 
-private final class DownloadDelegateEventSequencer: @unchecked Sendable {
-    @discardableResult
-    func enqueue(
-        _ operation: @escaping @Sendable () async -> Void
-    ) -> Task<Void, Never> {
-        lock.lock()
-        let predecessor = tail
-        let task = Task {
-            await predecessor?.value
-            await operation()
-        }
-        tail = task
-        lock.unlock()
-        return task
-    }
-
-    private let lock = NSLock()
-    private var tail: Task<Void, Never>?
-}
-
 private final class DownloadProgressThrottler: @unchecked Sendable {
-    init(
-        interval: TimeInterval = 0.2
-    ) {
+    init(interval: TimeInterval = 0.2) {
         self.interval = interval
     }
 
@@ -746,18 +573,4 @@ private final class DownloadProgressThrottler: @unchecked Sendable {
     private var pending: [String: Double] = [:]
     private var isFlushScheduled = false
     private var onFlush: (([String: Double]) -> Void)?
-}
-
-private enum VideoDownloadError: LocalizedError {
-    case unsupportedSource
-    case proxyProtectionEnabled
-
-    var errorDescription: String? {
-        switch self {
-        case .unsupportedSource:
-            return "当前播放源不支持视频下载。"
-        case .proxyProtectionEnabled:
-            return "应用代理已开启。系统后台下载无法安全接入进程内代理，已阻止直连下载。"
-        }
-    }
 }

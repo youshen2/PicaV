@@ -14,6 +14,7 @@ struct PicaVApp: App {
 
     init() {
         let settings = AppSettings()
+        let proxyRuntime = AppProxyRuntime(settings: settings)
         AnimeImageCacheService.configure()
         AnimeDetailCacheService.configure()
         _settings = StateObject(wrappedValue: settings)
@@ -23,11 +24,11 @@ struct PicaVApp: App {
         )
         _downloads = StateObject(
             wrappedValue: VideoDownloadService(
-                proxyProtectionEnabled: settings.appProxyEnabled
+                proxyRuntime: proxyRuntime
             )
         )
         _proxyRuntime = StateObject(
-            wrappedValue: AppProxyRuntime(settings: settings)
+            wrappedValue: proxyRuntime
         )
     }
 

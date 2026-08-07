@@ -354,6 +354,23 @@ final class AppSettings: ObservableObject {
         guestSessionActive = true
     }
 
+    func setRefreshedSessionToken(_ token: String) {
+        guard !token.isEmpty else { return }
+        if accessToken.isEmpty {
+            setGuestToken(token)
+        } else {
+            accessToken = token
+        }
+    }
+
+    func invalidateExpiredSession() {
+        if accessToken.isEmpty {
+            invalidateGuestSession()
+        } else {
+            logoutCurrentAccount()
+        }
+    }
+
     func invalidateGuestSession() {
         guestToken = ""
         KeychainStore.remove(Keys.guestToken)

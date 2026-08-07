@@ -6,6 +6,9 @@ struct VideoDownloadListPage: View {
     @State private var confirmsClearCompleted = false
     @State private var playbackRequest: DownloadedVideoPlaybackRequest?
     @State private var playbackErrorMessage: String?
+    @State private var fileExportRequest: VideoDownloadFileExportRequest?
+    @State private var saveFeedback: VideoDownloadSaveFeedback?
+    @State private var photoSaveItemID: String?
 
     let client: AnimeAPIClient
 
@@ -51,6 +54,19 @@ struct VideoDownloadListPage: View {
         .overlay(alignment: .topLeading) {
             downloadedPlayerPresenter
         }
+        .overlay {
+            if photoSaveItemID != nil {
+                ProgressView("正在保存到相册…")
+                    .padding()
+                    .background(.regularMaterial)
+                    .clipShape(
+                        RoundedRectangle(
+                            cornerRadius: 12,
+                            style: .continuous
+                        )
+                    )
+            }
+        }
         .navigationTitle("下载视频")
         .navigationBarTitleDisplayMode(.inline)
         .picaVHidesTabBar()
@@ -78,6 +94,16 @@ struct VideoDownloadListPage: View {
         } message: {
             Text(playbackErrorMessage ?? "")
         }
+        .alert(item: $saveFeedback) { feedback in
+            Alert(
+                title: Text(feedback.title),
+                message: Text(feedback.message),
+                dismissButton: .default(Text("好"))
+            )
+        }
+        .sheet(item: $fileExportRequest) { request in
+            VideoDownloadFileExporter(url: request.url)
+        }
     }
 
     private var visibleItemsAreEmpty: Bool {
@@ -102,6 +128,20 @@ struct VideoDownloadListPage: View {
         }
         .buttonStyle(.plain)
         .accessibilityHint("直接横屏全屏播放本地视频")
+        .contextMenu {
+            Button {
+                saveToFiles(item)
+            } label: {
+                Label("保存到文件", systemImage: "folder")
+            }
+
+            Button {
+                saveToPhotos(item)
+            } label: {
+                Label("保存到相册", systemImage: "photo")
+            }
+            .disabled(photoSaveItemID != nil)
+        }
     }
 
     @ViewBuilder
@@ -127,6 +167,46 @@ struct VideoDownloadListPage: View {
             item: item,
             localURL: localURL,
             recordsHistory: item.platformID == client.platformID
+        )
+    }
+
+    private func saveToFiles(_ item: VideoDownloadItem) {
+        guard let localURL = downloads.localPlaybackURL(for: item) else {
+            showMissingFileFeedback()
+            return
+        }
+        fileExportRequest = VideoDownloadFileExportRequest(url: localURL)
+    }
+
+    private func saveToPhotos(_ item: VideoDownloadItem) {
+        guard photoSaveItemID == nil else { return }
+        guard let localURL = downloads.localPlaybackURL(for: item) else {
+            showMissingFileFeedback()
+            return
+        }
+
+        photoSaveItemID = item.id
+        Task {
+            do {
+                try await VideoDownloadPhotoLibrary.saveVideo(at: localURL)
+                saveFeedback = VideoDownloadSaveFeedback(
+                    title: "已保存到相册",
+                    message: "\(item.anime.title) · \(item.episodeTitle)"
+                )
+            } catch {
+                saveFeedback = VideoDownloadSaveFeedback(
+                    title: "保存失败",
+                    message: error.localizedDescription
+                )
+            }
+            photoSaveItemID = nil
+        }
+    }
+
+    private func showMissingFileFeedback() {
+        saveFeedback = VideoDownloadSaveFeedback(
+            title: "保存失败",
+            message: "本地 MP4 文件已不存在，请重新下载。"
         )
     }
 
@@ -181,6 +261,12 @@ struct VideoDownloadListPage: View {
             Label("删除", systemImage: "trash")
         }
     }
+}
+
+private struct VideoDownloadSaveFeedback: Identifiable {
+    let id = UUID()
+    let title: String
+    let message: String
 }
 
 private struct VideoDownloadRow: View {

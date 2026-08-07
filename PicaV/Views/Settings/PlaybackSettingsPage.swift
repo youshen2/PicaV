@@ -35,7 +35,9 @@ struct PlaybackSettingsPage: View {
 
             Section(
                 header: Text("下载"),
-                footer: Text("关闭后，新建下载任务只会使用 Wi‑Fi。")
+                footer: Text(
+                    "关闭后，在蜂窝网络下启动的下载会等待你连接 Wi‑Fi 后重试。"
+                )
             ) {
                 Toggle(
                     "允许使用蜂窝网络",

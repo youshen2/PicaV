@@ -25,7 +25,10 @@ struct VideoDownloadSelectionSheet: View {
                 } header: {
                     Text(detail.anime.title)
                 } footer: {
-                    Text("视频由系统后台下载；完成后可在无网络时播放。")
+                    Text(
+                        "视频会在应用内下载并保存为 MP4；"
+                            + "完成后可离线播放或导出。"
+                    )
                 }
             }
             .listStyle(.insetGrouped)

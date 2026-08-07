@@ -11,24 +11,6 @@ struct AppProxySettingsPage: View {
     var body: some View {
         Form {
             Section(
-                header: Text("当前路由"),
-                footer: Text(
-                    settings.appProxyEnabled
-                        ? "代理不可用时会中断请求，不会静默回退直连。"
-                        : "当前请求不经过任何应用代理。"
-                )
-            ) {
-                SettingsValueRow(
-                    title: "方式",
-                    value: settings.appNetworkRoutingMode.displayName
-                )
-                SettingsValueRow(
-                    title: "在线播放",
-                    value: proxyRuntime.mediaStatusText
-                )
-            }
-
-            Section(
                 header: Text("请求方式"),
                 footer: Text(
                     "“代理服务器”只转发给外部 HTTP/HTTPS/SOCKS5 服务；"
@@ -95,19 +77,6 @@ struct AppProxySettingsPage: View {
                         feedback.isError ? .red : .green
                     )
                 }
-            }
-
-            Section(
-                header: Text("流量范围"),
-                footer: Text(
-                    "API、图片与在线播放会使用所选路由。系统后台下载无法安全接入进程内隧道，"
-                        + "使用任一代理时会被阻止；本地内容不受影响。"
-                )
-            ) {
-                SettingsValueRow(title: "API 与登录", value: "受保护")
-                SettingsValueRow(title: "图片", value: "受保护")
-                SettingsValueRow(title: "在线播放", value: "受保护")
-                SettingsValueRow(title: "后台下载", value: "代理时停用")
             }
         }
         .navigationTitle("应用代理")

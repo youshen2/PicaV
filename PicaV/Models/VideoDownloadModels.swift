@@ -53,7 +53,7 @@ struct VideoDownloadItem: Identifiable, Codable, Hashable {
         case .paused:
             return "已暂停 \(Int(progress * 100))%"
         case .completed:
-            return "已下载"
+            return "已下载 MP4"
         case .failed:
             return errorMessage ?? "下载失败"
         }

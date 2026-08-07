@@ -34,6 +34,29 @@ final class AppProxyRuntime: ObservableObject {
         }
     }
 
+    func mediaProxyURLForCurrentRoute() async throws -> URL? {
+        guard settings.appProxyEnabled else { return nil }
+
+        if case .ready(let url) = mediaState {
+            return url
+        }
+        if let refreshTask {
+            await refreshTask.value
+            if case .ready(let url) = mediaState {
+                return url
+            }
+        }
+
+        await refresh()
+        if case .ready(let url) = mediaState {
+            return url
+        }
+        if case .failed(let message) = mediaState {
+            throw AppProxyError.mediaBridgeUnavailable(message)
+        }
+        throw AppProxyError.mediaBridgeUnavailable("代理桥接尚未就绪")
+    }
+
     init(settings: AppSettings) {
         self.settings = settings
         settingsSubscription = settings.$appProxyRevision.sink {

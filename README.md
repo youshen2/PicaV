@@ -69,8 +69,9 @@ iOS 18 及以上会使用 `matchedTransitionSource` 与
 
 ### 下载、缓存与本地数据
 
-- 使用 `AVAssetDownloadURLSession` 下载平台提供的 HLS 播放资源。
-- 支持选择剧集、后台下载、暂停、继续、失败重试、删除和完成记录清理。
+- 使用 FFmpegKit 读取平台 HLS 播放源并统一封装为 MP4。
+- 支持选择剧集、前台下载、暂停、继续、失败重试、删除和完成记录清理。
+- 下载完成项可长按保存到“文件”或“相册”。
 - 播放器会优先使用已完成的本地资源，实现离线观看。
 - 图片使用内存与磁盘缓存，并在解码前处理平台图片代理、图片域和异或图片数据。
 - 详情缓存只保存安全元数据，不保存临时播放鉴权；空标题、无效 ID、错误响应等
@@ -107,8 +108,8 @@ iOS 18 及以上会使用 `matchedTransitionSource` 与
   不会回退直连。
 - 代理服务器凭据以及 YAML 节点的密码、UUID 等密钥保存在 Keychain；下载后的
   YAML 只在本机解析。
-- 系统后台 HLS 下载无法可靠接入进程内隧道，因此代理开启期间会停止并阻止后台
-  下载；已完成的本地内容仍可离线播放。
+- MP4 下载与在线播放共用进程内代理桥；下载不创建系统后台任务，避免媒体请求
+  绕过当前应用代理路由；已完成的本地内容仍可离线播放。
 
 ## 当前平台
 
@@ -150,7 +151,7 @@ PlatformRequest / AnimeMapper / CommunityMapper
 - `AnimeMapper` 和 `CommunityMapper` 把平台字段转换为通用内容模型。
 - `LibraryStore` 维护本地收藏、历史和播放进度。
 - `AnimeImageCacheService` 与 `AnimeDetailCacheService` 负责经过校验的安全缓存。
-- `VideoDownloadService` 管理系统 HLS 后台下载任务和离线资源。
+- `VideoDownloadService` 管理前台 MP4 下载队列、代理路由和离线资源。
 - `AppNetworkSessionFactory`、`AppProxyURLProtocol` 与
   `AppMediaProxyBridge` 分别管理受保护会话、应用内 HTTP(S) 请求和在线播放桥接。
 

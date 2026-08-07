@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		A7A14F7C3F12000100000001 /* Yams in Frameworks */ = {isa = PBXBuildFile; productRef = A7A14F7C3F12000100000003 /* Yams */; };
 		B1D5A4C13EFA4A68A0010001 /* KSPlayer in Frameworks */ = {isa = PBXBuildFile; productRef = B1D5A4C13EFA4A68A0010003 /* KSPlayer */; };
+		C8F4E2A43F12000100000001 /* FFmpegKit in Frameworks */ = {isa = PBXBuildFile; productRef = C8F4E2A43F12000100000003 /* FFmpegKit */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -28,6 +29,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C8F4E2A43F12000100000001 /* FFmpegKit in Frameworks */,
 				B1D5A4C13EFA4A68A0010001 /* KSPlayer in Frameworks */,
 				A7A14F7C3F12000100000001 /* Yams in Frameworks */,
 			);
@@ -72,6 +74,7 @@
 			);
 			name = PicaV;
 			packageProductDependencies = (
+				C8F4E2A43F12000100000003 /* FFmpegKit */,
 				B1D5A4C13EFA4A68A0010003 /* KSPlayer */,
 				A7A14F7C3F12000100000003 /* Yams */,
 			);
@@ -104,6 +107,7 @@
 			mainGroup = 6D393B7C30134AFD00C5701C;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
+				C8F4E2A43F12000100000002 /* XCRemoteSwiftPackageReference "FFmpegKit" */,
 				B1D5A4C13EFA4A68A0010002 /* XCRemoteSwiftPackageReference "KSPlayer" */,
 				A7A14F7C3F12000100000002 /* XCRemoteSwiftPackageReference "Yams" */,
 			);
@@ -264,6 +268,7 @@
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = PicaV;
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "用于将已下载的 MP4 视频保存到相册。";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
@@ -302,6 +307,7 @@
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = PicaV;
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "用于将已下载的 MP4 视频保存到相册。";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
@@ -368,6 +374,14 @@
 				version = 2.3.4;
 			};
 		};
+		C8F4E2A43F12000100000002 /* XCRemoteSwiftPackageReference "FFmpegKit" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/kingslay/FFmpegKit.git";
+			requirement = {
+				kind = exactVersion;
+				version = 6.1.4;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -380,6 +394,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = B1D5A4C13EFA4A68A0010002 /* XCRemoteSwiftPackageReference "KSPlayer" */;
 			productName = KSPlayer;
+		};
+		C8F4E2A43F12000100000003 /* FFmpegKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = C8F4E2A43F12000100000002 /* XCRemoteSwiftPackageReference "FFmpegKit" */;
+			productName = FFmpegKit;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
