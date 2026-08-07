@@ -198,12 +198,20 @@ private struct CommunityFeedCard: View {
                 CommunityDetailPage(post: post, client: client)
                     .picaVHidesTabBar()
             } label: {
-                CommunityPostBody(
+                CommunityPostSummary(
                     post: post,
                     linksAreInteractive: false
                 )
             }
             .buttonStyle(.plain)
+
+            if !post.imageURLs.isEmpty {
+                CommunityImageGrid(urls: post.imageURLs)
+            }
+
+            if post.viewCount > 0 {
+                CommunityPostViewCount(viewCount: post.viewCount)
+            }
 
             if let video = post.video {
                 CommunityVideoPlayerView(

@@ -9,21 +9,25 @@ struct RemoteImageView: View {
     private let urls: [URL]
     private let maxPixelSize: CGFloat
     private let contentMode: ContentMode
+    private let backgroundColor: Color
 
     init(
         url: URL?,
         maxPixelSize: CGFloat = 900,
-        contentMode: ContentMode = .fill
+        contentMode: ContentMode = .fill,
+        backgroundColor: Color = Color(UIColor.secondarySystemFill)
     ) {
         urls = url.map { [$0] } ?? []
         self.maxPixelSize = maxPixelSize
         self.contentMode = contentMode
+        self.backgroundColor = backgroundColor
     }
 
     init(
         urls: [URL?],
         maxPixelSize: CGFloat = 900,
-        contentMode: ContentMode = .fill
+        contentMode: ContentMode = .fill,
+        backgroundColor: Color = Color(UIColor.secondarySystemFill)
     ) {
         var seen = Set<String>()
         self.urls = urls.compactMap { $0 }.filter {
@@ -31,11 +35,12 @@ struct RemoteImageView: View {
         }
         self.maxPixelSize = maxPixelSize
         self.contentMode = contentMode
+        self.backgroundColor = backgroundColor
     }
 
     var body: some View {
         ZStack {
-            Color(.secondarySystemFill)
+            backgroundColor
 
             if let image = displayedImage {
                 Image(uiImage: image)

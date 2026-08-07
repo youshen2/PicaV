@@ -6,6 +6,30 @@ struct CommunityPostBody: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
+            CommunityPostSummary(
+                post: post,
+                linksAreInteractive: linksAreInteractive
+            )
+
+            if !post.imageURLs.isEmpty {
+                CommunityImageGrid(urls: post.imageURLs)
+            }
+
+            if post.viewCount > 0 {
+                CommunityPostViewCount(viewCount: post.viewCount)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+    }
+}
+
+struct CommunityPostSummary: View {
+    let post: CommunityPost
+    var linksAreInteractive = true
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .top, spacing: 11) {
                 RemoteImageView(url: post.avatarURL, maxPixelSize: 160)
                     .frame(width: 44, height: 44)
@@ -47,17 +71,19 @@ struct CommunityPostBody: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .multilineTextAlignment(.leading)
             }
-
-            CommunityImageGrid(urls: post.imageURLs)
-
-            if post.viewCount > 0 {
-                Text("\(CommunityCountFormatter.display(post.viewCount)) 次浏览")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
+    }
+}
+
+struct CommunityPostViewCount: View {
+    let viewCount: Int
+
+    var body: some View {
+        Text("\(CommunityCountFormatter.display(viewCount)) 次浏览")
+            .font(.caption)
+            .foregroundColor(.secondary)
     }
 }
 
@@ -180,8 +206,10 @@ struct CommunityCommentCard: View {
     }
 }
 
-private struct CommunityImageGrid: View {
+struct CommunityImageGrid: View {
     let urls: [URL]
+
+    @State private var viewerRequest: CommunityImageViewerRequest?
 
     private let itemSize: CGFloat = 92
     private var columns: [GridItem] {
@@ -194,22 +222,55 @@ private struct CommunityImageGrid: View {
         ]
     }
 
+    private var displayedURLs: [URL] {
+        Array(urls.prefix(9))
+    }
+
     var body: some View {
         LazyVGrid(columns: columns, alignment: .leading, spacing: 6) {
-            ForEach(Array(urls.prefix(9).enumerated()), id: \.offset) { _, url in
-                RemoteImageView(
-                    url: url,
-                    maxPixelSize: 500,
-                    contentMode: .fill
-                )
-                .frame(width: itemSize, height: itemSize)
-                .clipped()
-                .clipShape(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+            ForEach(
+                Array(displayedURLs.enumerated()),
+                id: \.offset
+            ) { index, url in
+                Button {
+                    viewerRequest = CommunityImageViewerRequest(
+                        urls: displayedURLs,
+                        initialIndex: index
+                    )
+                } label: {
+                    RemoteImageView(
+                        url: url,
+                        maxPixelSize: 500,
+                        contentMode: .fill
+                    )
+                    .frame(width: itemSize, height: itemSize)
+                    .clipped()
+                    .clipShape(
+                        RoundedRectangle(
+                            cornerRadius: 8,
+                            style: .continuous
+                        )
+                    )
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(
+                    "查看帖子图片 \(index + 1)，共 \(displayedURLs.count) 张"
                 )
             }
         }
+        .fullScreenCover(item: $viewerRequest) { request in
+            RemoteImageViewer(
+                urls: request.urls,
+                initialIndex: request.initialIndex
+            )
+        }
     }
+}
+
+private struct CommunityImageViewerRequest: Identifiable {
+    let id = UUID()
+    let urls: [URL]
+    let initialIndex: Int
 }
 
 enum CommunityTimeFormatter {
