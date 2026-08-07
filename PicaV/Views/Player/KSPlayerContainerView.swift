@@ -298,11 +298,78 @@ final class PicaKSPlayerView: IOSVideoPlayerView {
     var fullScreenDidChange: ((Bool) -> Void)?
     var preferredFullScreenOrientationMask: UIInterfaceOrientationMask?
 
+    override func set(
+        resource: KSPlayerResource,
+        definitionIndex: Int = 0,
+        isSetUrl: Bool = true
+    ) {
+        guard isSetUrl else {
+            super.set(
+                resource: resource,
+                definitionIndex: definitionIndex,
+                isSetUrl: false
+            )
+            return
+        }
+        loadResource(
+            resource,
+            definitionIndex: definitionIndex,
+            seekTime: nil,
+            shouldPlay: true
+        )
+    }
+
     override func player(layer: KSPlayerLayer, state: KSPlayerState) {
         super.player(layer: layer, state: state)
-        if state == .readyToPlay {
-            installPlaybackRateMenu()
+        guard layer === playerLayer else { return }
+        switch state {
+        case .initialized:
+            guard playbackPreparationState != .idle else { return }
+            playbackPreparationState = .preparing
+            applyPlaybackLoadingState()
+            schedulePreparationTimeout(for: layer)
+            prepareFallbackPlayerOnNextRunLoop(layer)
+        case .preparing:
+            applyPlaybackLoadingState()
+        case .readyToPlay:
+            finishPlaybackPreparation(for: layer)
+        case .error:
+            showPlaybackRetry(message: "视频加载失败，点按重试")
+        case .bufferFinished:
+            finishPlaybackStartup(for: layer)
+        case .paused:
+            if playbackPreparationState == .starting,
+               !playbackRequested {
+                finishPlaybackStartup(for: layer)
+            }
+        case .buffering:
+            if playbackPreparationState == .starting {
+                applyPlaybackLoadingState()
+            }
+        case .playedToTheEnd:
+            break
         }
+    }
+
+    override func player(
+        layer: KSPlayerLayer,
+        currentTime: TimeInterval,
+        totalTime: TimeInterval
+    ) {
+        super.player(
+            layer: layer,
+            currentTime: currentTime,
+            totalTime: totalTime
+        )
+        guard layer === playerLayer,
+              playbackPreparationState == .starting,
+              currentTime.isFinite,
+              currentTime > 0,
+              layer.player.playbackState == .playing,
+              layer.player.loadState == .playable else {
+            return
+        }
+        finishPlaybackStartup(for: layer)
     }
 
     override func player(layer: KSPlayerLayer, finish error: Error?) {
@@ -331,6 +398,11 @@ final class PicaKSPlayerView: IOSVideoPlayerView {
             )
             return
         }
+        if (type == .play || type == .replay),
+           playbackPreparationState == .idle || playbackIsStarting {
+            applyPlaybackLoadingState()
+            return
+        }
         super.onButtonPressed(type: type, button: button)
     }
 
@@ -357,8 +429,57 @@ final class PicaKSPlayerView: IOSVideoPlayerView {
     }
 
     override func change(definitionIndex: Int) {
-        super.change(definitionIndex: definitionIndex)
+        guard let resource, !resource.definitions.isEmpty else { return }
+        let seekTime: TimeInterval?
+        if let playerLayer,
+           playerLayer.state != .playedToTheEnd,
+           playerLayer.player.currentPlaybackTime > 0 {
+            seekTime = playerLayer.player.currentPlaybackTime
+        } else {
+            seekTime = nil
+        }
+        loadResource(
+            resource,
+            definitionIndex: definitionIndex,
+            seekTime: seekTime,
+            shouldPlay: playbackRequested
+        )
         sourceDidChange?(definitionIndex)
+    }
+
+    override func play() {
+        playbackRequested = true
+        switch playbackPreparationState {
+        case .ready:
+            startPreparedPlayback()
+        case .failed:
+            reloadCurrentResource()
+        case .preparing, .starting:
+            applyPlaybackLoadingState()
+        case .idle:
+            if resource != nil {
+                reloadCurrentResource()
+            }
+        }
+    }
+
+    override func pause() {
+        playbackRequested = false
+        guard playbackPreparationState == .ready
+                || playbackPreparationState == .starting else {
+            toolBar.playButton.isSelected = false
+            return
+        }
+        super.pause()
+    }
+
+    override func resetPlayer() {
+        preparationTimeoutWorkItem?.cancel()
+        super.resetPlayer()
+        playbackPreparationState = .idle
+        playbackRequested = false
+        pendingSeekTime = nil
+        applyPlaybackIdleState()
     }
 
     override func seek(
@@ -418,6 +539,217 @@ final class PicaKSPlayerView: IOSVideoPlayerView {
         )
         toolBar.playbackRateButton.showsMenuAsPrimaryAction = true
         toolBar.playbackRateButton.accessibilityLabel = "播放速度"
+    }
+
+    private func loadResource(
+        _ resource: KSPlayerResource,
+        definitionIndex: Int,
+        seekTime: TimeInterval?,
+        shouldPlay: Bool
+    ) {
+        guard !resource.definitions.isEmpty else {
+            showPlaybackRetry(message: "没有可用的播放线路")
+            return
+        }
+
+        preparationTimeoutWorkItem?.cancel()
+        if playerLayer != nil {
+            super.pause()
+        }
+
+        let index = min(
+            max(definitionIndex, 0),
+            resource.definitions.count - 1
+        )
+        playbackRequested = shouldPlay
+        pendingSeekTime = seekTime
+        playbackPreparationState = .preparing
+        applyPlaybackLoadingState()
+
+        super.set(
+            resource: resource,
+            definitionIndex: index,
+            isSetUrl: false
+        )
+        let definition = resource.definitions[index]
+        srtControl.url = definition.url
+        toolBar.currentTime = 0
+        totalTime = 0
+
+        let layer = KSPlayerLayer(
+            url: definition.url,
+            isAutoPlay: false,
+            options: definition.options
+        )
+        playerLayer = layer
+        schedulePreparationTimeout(for: layer)
+        layer.prepareToPlay()
+    }
+
+    private func finishPlaybackPreparation(for layer: KSPlayerLayer) {
+        installPlaybackRateMenu()
+
+        guard let seekTime = pendingSeekTime,
+              seekTime > 0,
+              layer.player.seekable else {
+            pendingSeekTime = nil
+            finishPlaybackStartup(for: layer)
+            startPreparedPlayback()
+            return
+        }
+        pendingSeekTime = nil
+        playbackPreparationState = .starting
+        applyPlaybackLoadingState()
+        schedulePreparationTimeout(for: layer)
+        layer.seek(time: seekTime, autoPlay: false) {
+            [weak self, weak layer] _ in
+            DispatchQueue.main.async {
+                guard let self,
+                      let layer,
+                      layer === self.playerLayer else {
+                    return
+                }
+                self.finishPlaybackStartup(for: layer)
+                self.startPreparedPlayback()
+            }
+        }
+    }
+
+    private func finishPlaybackStartup(for layer: KSPlayerLayer) {
+        guard playbackIsStarting else { return }
+        preparationTimeoutWorkItem?.cancel()
+        playbackPreparationState = .ready
+        applyPlaybackReadyState(for: layer)
+    }
+
+    private func startPreparedPlayback() {
+        guard playbackPreparationState == .ready,
+              playbackRequested,
+              let layer = playerLayer else {
+            return
+        }
+        playbackPreparationState = .starting
+        applyPlaybackLoadingState()
+        schedulePreparationTimeout(for: layer)
+        super.play()
+    }
+
+    private func reloadCurrentResource() {
+        guard let resource else {
+            showPlaybackRetry(message: "没有可用的视频资源")
+            return
+        }
+        let currentTime = playerLayer?.player.currentPlaybackTime ?? 0
+        loadResource(
+            resource,
+            definitionIndex: currentDefinition,
+            seekTime: currentTime > 0 ? currentTime : nil,
+            shouldPlay: true
+        )
+    }
+
+    private func schedulePreparationTimeout(for layer: KSPlayerLayer) {
+        preparationTimeoutWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self, weak layer] in
+            guard let self,
+                  let layer,
+                  layer === self.playerLayer,
+                  self.playbackIsStarting else {
+                return
+            }
+            self.showPlaybackRetry(message: "视频加载超时，点按重试")
+        }
+        preparationTimeoutWorkItem = workItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + Self.preparationTimeout,
+            execute: workItem
+        )
+    }
+
+    private func prepareFallbackPlayerOnNextRunLoop(
+        _ layer: KSPlayerLayer
+    ) {
+        DispatchQueue.main.async { [weak self, weak layer] in
+            guard let self,
+                  let layer,
+                  layer === self.playerLayer,
+                  self.playbackPreparationState == .preparing,
+                  layer.state == .initialized else {
+                return
+            }
+            layer.prepareToPlay()
+        }
+    }
+
+    private func showPlaybackRetry(message: String) {
+        preparationTimeoutWorkItem?.cancel()
+        playbackRequested = false
+        playerLayer?.pause()
+        playbackPreparationState = .failed
+        loadingIndector.isHidden = true
+        loadingIndector.stopAnimating()
+        toolBar.playButton.isEnabled = true
+        toolBar.playButton.isSelected = false
+        toolBar.playButton.accessibilityHint = message
+        replayButton.isEnabled = true
+        replayButton.isHidden = false
+        replayButton.isSelected = true
+        replayButton.accessibilityLabel = "重新加载视频"
+        replayButton.accessibilityHint = message
+        toolBar.isSeekable = false
+        toolBar.timeSlider.isPlayable = false
+    }
+
+    private func applyPlaybackLoadingState() {
+        toolBar.playButton.isEnabled = false
+        toolBar.playButton.isSelected = false
+        replayButton.isEnabled = false
+        replayButton.isHidden = true
+        replayButton.isSelected = false
+        toolBar.isSeekable = false
+        toolBar.timeSlider.isPlayable = false
+        let loadingHint = "视频加载完成后可播放"
+        toolBar.playButton.accessibilityHint = loadingHint
+        replayButton.accessibilityHint = loadingHint
+        loadingIndector.isHidden = false
+        loadingIndector.startAnimating()
+    }
+
+    private func applyPlaybackReadyState(for layer: KSPlayerLayer) {
+        loadingIndector.isHidden = true
+        loadingIndector.stopAnimating()
+        toolBar.playButton.isEnabled = true
+        toolBar.playButton.isSelected = playbackRequested
+        toolBar.playButton.accessibilityHint = nil
+        replayButton.isEnabled = true
+        replayButton.isHidden = playbackRequested
+        replayButton.isSelected = false
+        replayButton.accessibilityLabel = "播放视频"
+        replayButton.accessibilityHint = nil
+        let isSeekable = layer.player.seekable
+        toolBar.isSeekable = isSeekable
+        toolBar.timeSlider.isPlayable = isSeekable
+    }
+
+    private func applyPlaybackIdleState() {
+        loadingIndector.isHidden = true
+        loadingIndector.stopAnimating()
+        toolBar.playButton.isEnabled = false
+        toolBar.playButton.isSelected = false
+        replayButton.isEnabled = false
+        replayButton.isHidden = true
+        replayButton.isSelected = false
+        toolBar.isSeekable = false
+        toolBar.timeSlider.isPlayable = false
+    }
+
+    private var playbackIsStarting: Bool {
+        switch playbackPreparationState {
+        case .preparing, .starting:
+            return true
+        case .idle, .ready, .failed:
+            return false
+        }
     }
 
     private static func rateTitle(_ rate: Float) -> String {
@@ -614,6 +946,7 @@ final class PicaKSPlayerView: IOSVideoPlayerView {
         4,
         5
     ]
+    private static let preparationTimeout: TimeInterval = 20
     private weak var originalPlayerSuperview: UIView?
     private weak var fullScreenPresenter: UIViewController?
     private weak var fullScreenController: PicaPlayerFullScreenViewController?
@@ -626,6 +959,18 @@ final class PicaKSPlayerView: IOSVideoPlayerView {
     private var fullScreenPresentationState: FullScreenPresentationState =
         .inline
     private var shouldExitAfterPresentation = false
+    private var playbackPreparationState: PlaybackPreparationState = .idle
+    private var playbackRequested = true
+    private var pendingSeekTime: TimeInterval?
+    private var preparationTimeoutWorkItem: DispatchWorkItem?
+
+    private enum PlaybackPreparationState {
+        case idle
+        case preparing
+        case starting
+        case ready
+        case failed
+    }
 
     private enum FullScreenPresentationState {
         case inline
