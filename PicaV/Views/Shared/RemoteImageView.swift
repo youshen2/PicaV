@@ -37,7 +37,7 @@ struct RemoteImageView: View {
         ZStack {
             Color(.secondarySystemFill)
 
-            if let image = loader.image {
+            if let image = displayedImage {
                 Image(uiImage: image)
                     .resizable()
                     .aspectRatio(contentMode: contentMode)
@@ -53,11 +53,13 @@ struct RemoteImageView: View {
         }
         .clipped()
         .task(id: taskID) {
+            let requestKey = taskID
             guard let networkRoute = try? settings.appNetworkRoute() else {
                 loader.reset()
                 return
             }
             await loader.load(
+                requestKey: requestKey,
                 urls: urls,
                 proxyBaseURL: settings.apiBaseURL,
                 useProxy: settings.useImageProxy,
@@ -66,6 +68,15 @@ struct RemoteImageView: View {
                 networkRoute: networkRoute
             )
         }
+    }
+
+    private var displayedImage: UIImage? {
+        loader.image(for: taskID)
+            ?? AnimeImagePipeline.shared.cachedImage(
+                for: urls,
+                configuration: settings.activePlatform.imageConfiguration,
+                maxPixelSize: maxPixelSize
+            )
     }
 
     private var taskID: String {
@@ -86,6 +97,7 @@ private final class RemoteImageLoader: ObservableObject {
     @Published private(set) var isLoading = false
 
     func load(
+        requestKey: String,
         urls: [URL],
         proxyBaseURL: URL,
         useProxy: Bool,
@@ -100,13 +112,29 @@ private final class RemoteImageLoader: ObservableObject {
             return
         }
 
-        let key = urls.map(\.absoluteString).joined(separator: "|")
-        if currentKey != key {
+        if currentKey == requestKey, image != nil {
+            isLoading = false
+            return
+        }
+        if currentKey != requestKey {
             image = nil
-            currentKey = key
+            currentKey = requestKey
+        }
+        if let cachedImage = AnimeImagePipeline.shared.cachedImage(
+            for: urls,
+            configuration: configuration,
+            maxPixelSize: maxPixelSize
+        ) {
+            image = cachedImage
+            isLoading = false
+            return
         }
         isLoading = true
-        defer { isLoading = false }
+        defer {
+            if currentKey == requestKey {
+                isLoading = false
+            }
+        }
         for url in urls {
             do {
                 let loaded = try await AnimeImagePipeline.shared.image(
@@ -117,7 +145,10 @@ private final class RemoteImageLoader: ObservableObject {
                     maxPixelSize: maxPixelSize,
                     networkRoute: networkRoute
                 )
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled,
+                      currentKey == requestKey else {
+                    return
+                }
                 withAnimation(.easeOut(duration: 0.18)) {
                     image = loaded
                 }
@@ -126,7 +157,13 @@ private final class RemoteImageLoader: ObservableObject {
                 guard !Task.isCancelled else { return }
             }
         }
-        image = nil
+        if currentKey == requestKey {
+            image = nil
+        }
+    }
+
+    func image(for requestKey: String) -> UIImage? {
+        currentKey == requestKey ? image : nil
     }
 
     func reset() {

@@ -13,20 +13,21 @@ final class AnimeImagePipeline {
         maxPixelSize: CGFloat,
         networkRoute: AppNetworkRoute
     ) async throws -> UIImage {
-        let cacheKeyValue = [
-            url.absoluteString,
-            String(Int(maxPixelSize)),
-            configuration.widthSuffix ?? "",
-            configuration.xorKey ?? "",
-            configuration.fallbackHost ?? "",
-            networkRoute.cacheIdentity
-        ].joined(separator: "|")
+        let cacheKeyValue = imageCacheKeyValue(
+            for: url,
+            configuration: configuration,
+            maxPixelSize: maxPixelSize
+        )
         let cacheKey = cacheKeyValue as NSString
         if let cached = imageCache.object(forKey: cacheKey) {
             return cached
         }
+        let requestKeyValue = [
+            cacheKeyValue,
+            networkRoute.cacheIdentity
+        ].joined(separator: "|")
         return try await requestCoordinator.image(
-            for: cacheKeyValue
+            for: requestKeyValue
         ) { [self] in
             try await loadImage(
                 for: url,
@@ -38,6 +39,24 @@ final class AnimeImagePipeline {
                 networkRoute: networkRoute
             )
         }
+    }
+
+    func cachedImage(
+        for urls: [URL],
+        configuration: PlatformImageConfiguration,
+        maxPixelSize: CGFloat
+    ) -> UIImage? {
+        for url in urls {
+            let key = imageCacheKeyValue(
+                for: url,
+                configuration: configuration,
+                maxPixelSize: maxPixelSize
+            ) as NSString
+            if let image = imageCache.object(forKey: key) {
+                return image
+            }
+        }
+        return nil
     }
 
     private func loadImage(
@@ -197,6 +216,20 @@ final class AnimeImagePipeline {
             throw URLError(.badServerResponse)
         }
         return data
+    }
+
+    private func imageCacheKeyValue(
+        for url: URL,
+        configuration: PlatformImageConfiguration,
+        maxPixelSize: CGFloat
+    ) -> String {
+        [
+            url.absoluteString,
+            String(Int(maxPixelSize)),
+            configuration.widthSuffix ?? "",
+            configuration.xorKey ?? "",
+            configuration.fallbackHost ?? ""
+        ].joined(separator: "|")
     }
 
     private func imageProxyURL(for remoteURL: URL, baseURL: URL, path: String) -> URL? {
