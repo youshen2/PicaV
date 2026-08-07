@@ -25,7 +25,7 @@ struct StorageSettingsPage: View {
                     VideoDownloadListPage(client: client)
                 } label: {
                     HStack {
-                        Text("本地下载")
+                        Text("下载视频")
                         Spacer()
                         Text("\(downloads.items.count) 集")
                             .foregroundColor(.secondary)

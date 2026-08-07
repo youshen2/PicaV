@@ -10,6 +10,7 @@ struct KSPlayerContainerView: UIViewRepresentable {
     let initialSourceIndex: Int
     let resumeTime: TimeInterval
     let isActive: Bool
+    let startsInFullScreen: Bool
     let onProgress: (TimeInterval, TimeInterval) -> Void
     let onPlaybackEnded: () -> Void
     let onSourceChange: (Int) -> Void
@@ -29,8 +30,11 @@ struct KSPlayerContainerView: UIViewRepresentable {
         let view = hostView.playerView
         view.backgroundColor = .black
         view.toolBar.definitionButton.accessibilityLabel = "播放线路"
-        context.coordinator.attach(to: view)
+        context.coordinator.attach(to: view, hostView: hostView)
         configure(hostView, coordinator: context.coordinator)
+        context.coordinator.updateFullScreenRequest(
+            startsInFullScreen
+        )
         return hostView
     }
 
@@ -40,6 +44,9 @@ struct KSPlayerContainerView: UIViewRepresentable {
         context.coordinator.onSourceChange = onSourceChange
         context.coordinator.onFullScreenChange = onFullScreenChange
         configure(hostView, coordinator: context.coordinator)
+        context.coordinator.updateFullScreenRequest(
+            startsInFullScreen
+        )
     }
 
     static func dismantleUIView(
@@ -52,6 +59,7 @@ struct KSPlayerContainerView: UIViewRepresentable {
         }
         view.pause()
         view.resetPlayer()
+        coordinator.detach()
         coordinator.resourceSignature = nil
     }
 
@@ -144,6 +152,9 @@ struct KSPlayerContainerView: UIViewRepresentable {
         var onFullScreenChange: (Bool) -> Void
         var resourceSignature: String?
         var wasActive: Bool?
+        private weak var hostView: PicaPlayerHostView?
+        private var shouldStartInFullScreen = false
+        private var didRequestInitialFullScreen = false
 
         init(
             onProgress: @escaping (TimeInterval, TimeInterval) -> Void,
@@ -157,7 +168,14 @@ struct KSPlayerContainerView: UIViewRepresentable {
             self.onFullScreenChange = onFullScreenChange
         }
 
-        func attach(to view: PicaKSPlayerView) {
+        func attach(
+            to view: PicaKSPlayerView,
+            hostView: PicaPlayerHostView
+        ) {
+            self.hostView = hostView
+            hostView.didAttachToWindow = { [weak self] in
+                self?.enterFullScreenIfNeeded()
+            }
             view.playTimeDidChange = { [weak self] currentTime, totalTime in
                 self?.onProgress(currentTime, totalTime)
             }
@@ -172,11 +190,44 @@ struct KSPlayerContainerView: UIViewRepresentable {
             }
             view.backBlock = {}
         }
+
+        func updateFullScreenRequest(_ shouldStart: Bool) {
+            shouldStartInFullScreen = shouldStart
+            hostView?.playerView.preferredFullScreenOrientationMask =
+                shouldStart ? .landscapeRight : nil
+            enterFullScreenIfNeeded()
+        }
+
+        func detach() {
+            hostView?.didAttachToWindow = nil
+            hostView = nil
+        }
+
+        private func enterFullScreenIfNeeded() {
+            guard shouldStartInFullScreen,
+                  !didRequestInitialFullScreen,
+                  let hostView,
+                  hostView.window != nil else {
+                return
+            }
+            didRequestInitialFullScreen = true
+            DispatchQueue.main.async { [weak self, weak hostView] in
+                guard let self else { return }
+                guard self.shouldStartInFullScreen,
+                      let hostView,
+                      hostView.window != nil else {
+                    self.didRequestInitialFullScreen = false
+                    return
+                }
+                hostView.playerView.updateUI(isFullScreen: true)
+            }
+        }
     }
 }
 
 final class PicaPlayerHostView: UIView {
     let playerView = PicaKSPlayerView()
+    var didAttachToWindow: (() -> Void)?
     private let statusLabel = UILabel()
 
     override init(frame: CGRect) {
@@ -223,6 +274,13 @@ final class PicaPlayerHostView: UIView {
         playerView.playerLayer?.player.view?.setNeedsLayout()
     }
 
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window != nil {
+            didAttachToWindow?()
+        }
+    }
+
     func showStatus(_ message: String?) {
         statusLabel.text = message
         statusLabel.isHidden = message == nil
@@ -238,6 +296,7 @@ final class PicaKSPlayerView: IOSVideoPlayerView {
     var playbackDidFinish: (() -> Void)?
     var sourceDidChange: ((Int) -> Void)?
     var fullScreenDidChange: ((Bool) -> Void)?
+    var preferredFullScreenOrientationMask: UIInterfaceOrientationMask?
 
     override func player(layer: KSPlayerLayer, state: KSPlayerState) {
         super.player(layer: layer, state: state)
@@ -402,7 +461,8 @@ final class PicaKSPlayerView: IOSVideoPlayerView {
         NSLayoutConstraint.deactivate(originalPlayerConstraints)
 
         let targetMask: UIInterfaceOrientationMask =
-            isHorizonal() ? .landscapeRight : .portrait
+            preferredFullScreenOrientationMask
+                ?? (isHorizonal() ? .landscapeRight : .portrait)
         let controller = PicaPlayerFullScreenViewController(
             orientationMask: targetMask
         )

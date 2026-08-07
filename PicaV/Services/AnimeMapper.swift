@@ -643,7 +643,11 @@ enum AnimeMapper {
     static func imageURL(from value: Any?, domain: String?, baseURL: URL) -> URL? {
         guard let raw = imageString(from: value) else { return nil }
         if raw.hasPrefix("//") { return URL(string: "https:\(raw)") }
-        if let absolute = URL(string: raw), absolute.scheme != nil { return absolute }
+        if !raw.hasPrefix("cm://cm/"),
+           let absolute = URL(string: raw),
+           absolute.scheme != nil {
+            return absolute
+        }
 
         let host: URL
         if let domain, !domain.isEmpty {

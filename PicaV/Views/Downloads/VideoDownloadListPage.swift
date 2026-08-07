@@ -7,7 +7,10 @@ enum VideoDownloadListScope: Equatable {
 
 struct VideoDownloadListPage: View {
     @EnvironmentObject private var downloads: VideoDownloadService
+    @EnvironmentObject private var library: LibraryStore
     @State private var confirmsClearCompleted = false
+    @State private var playbackRequest: DownloadedVideoPlaybackRequest?
+    @State private var playbackErrorMessage: String?
 
     let client: AnimeAPIClient
     let scope: VideoDownloadListScope
@@ -29,7 +32,7 @@ struct VideoDownloadListPage: View {
                         : "arrow.down.circle",
                     title: scope == .cached
                         ? "还没有已缓存视频"
-                        : "还没有本地下载",
+                        : "还没有下载视频",
                     message: scope == .cached
                         ? "下载完成的剧集会集中显示在这里。"
                         : "在番剧详情页点按下载按钮，选择要离线观看的剧集。"
@@ -39,7 +42,7 @@ struct VideoDownloadListPage: View {
                     if scope == .all, !activeItems.isEmpty {
                         Section("下载任务") {
                             ForEach(activeItems) { item in
-                                downloadLink(item)
+                                VideoDownloadRow(item: item)
                                     .swipeActions(edge: .leading) {
                                         controlButton(for: item)
                                     }
@@ -53,7 +56,7 @@ struct VideoDownloadListPage: View {
                     if !completedItems.isEmpty {
                         Section(scope == .cached ? "离线内容" : "已下载") {
                             ForEach(completedItems) { item in
-                                downloadLink(item)
+                                downloadButton(item)
                                     .swipeActions(edge: .trailing) {
                                         deleteButton(item)
                                     }
@@ -65,7 +68,10 @@ struct VideoDownloadListPage: View {
             }
         }
         .background(Color(.systemGroupedBackground).ignoresSafeArea())
-        .navigationTitle(scope == .cached ? "已缓存" : "本地下载")
+        .overlay(alignment: .topLeading) {
+            downloadedPlayerPresenter
+        }
+        .navigationTitle(scope == .cached ? "已缓存" : "下载视频")
         .navigationBarTitleDisplayMode(.inline)
         .picaVHidesTabBar()
         .toolbar {
@@ -87,6 +93,11 @@ struct VideoDownloadListPage: View {
         } message: {
             Text("本地视频文件会被删除，平台收藏和浏览记录不会受到影响。")
         }
+        .alert("无法播放", isPresented: playbackErrorPresented) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text(playbackErrorMessage ?? "")
+        }
     }
 
     private var visibleItemsAreEmpty: Bool {
@@ -103,21 +114,53 @@ struct VideoDownloadListPage: View {
         downloads.items.filter { $0.status == .completed }
     }
 
-    private func downloadLink(
+    private func downloadButton(
         _ item: VideoDownloadItem
     ) -> some View {
-        NavigationLink {
-            AnimeDetailPage(
-                videoID: item.episodeID,
-                preview: item.anime,
-                client: client,
-                startsPlayback: true,
-                initialEpisodeID: item.episodeID,
-                initialEpisodeTitle: item.episodeTitle
-            )
+        Button {
+            playDownloadedVideo(item)
         } label: {
             VideoDownloadRow(item: item)
         }
+        .buttonStyle(.plain)
+        .accessibilityHint("直接横屏全屏播放本地视频")
+    }
+
+    @ViewBuilder
+    private var downloadedPlayerPresenter: some View {
+        if let request = playbackRequest {
+            DownloadedVideoPlayerPresenter(
+                request: request,
+                library: library
+            ) {
+                guard playbackRequest?.id == request.id else { return }
+                playbackRequest = nil
+            }
+            .id(request.id)
+        }
+    }
+
+    private func playDownloadedVideo(_ item: VideoDownloadItem) {
+        guard let localURL = downloads.localPlaybackURL(for: item) else {
+            playbackErrorMessage = "本地视频文件已不存在，请重新下载。"
+            return
+        }
+        playbackRequest = DownloadedVideoPlaybackRequest(
+            item: item,
+            localURL: localURL,
+            recordsHistory: item.platformID == client.platformID
+        )
+    }
+
+    private var playbackErrorPresented: Binding<Bool> {
+        Binding(
+            get: { playbackErrorMessage != nil },
+            set: { isPresented in
+                if !isPresented {
+                    playbackErrorMessage = nil
+                }
+            }
+        )
     }
 
     @ViewBuilder

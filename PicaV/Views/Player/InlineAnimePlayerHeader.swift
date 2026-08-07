@@ -50,6 +50,7 @@ struct InlineAnimePlayerHeader: View {
                     initialSourceIndex: viewModel.selectedSourceIndex,
                     resumeTime: viewModel.resumeTime,
                     isActive: isActive,
+                    startsInFullScreen: false,
                     onProgress: { currentTime, totalTime in
                         viewModel.progressDidChange(
                             currentTime: currentTime,

@@ -240,10 +240,26 @@ final class VideoDownloadService: NSObject, ObservableObject {
             platformID: platformID,
             animeID: animeID,
             episodeID: episodeID
-        ), item.status == .completed else {
+        ) else {
             return nil
         }
-        return localURL(for: item)
+        return localPlaybackURL(for: item)
+    }
+
+    func localPlaybackURL(for item: VideoDownloadItem) -> URL? {
+        guard let currentItem = self.item(withID: item.id),
+              currentItem.status == .completed else {
+            return nil
+        }
+        guard let localURL = localURL(for: currentItem) else {
+            updateItem(currentItem.id) {
+                $0.status = .failed
+                $0.localPath = nil
+                $0.errorMessage = "本地视频文件已不存在，请重新下载。"
+            }
+            return nil
+        }
+        return localURL
     }
 
     func isUnavailableForDownload(
@@ -742,7 +758,7 @@ private enum VideoDownloadError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .unsupportedSource:
-            return "当前播放源不支持本地下载。"
+            return "当前播放源不支持视频下载。"
         case .proxyProtectionEnabled:
             return "应用代理已开启。系统后台下载无法安全接入进程内代理，已阻止直连下载。"
         }
