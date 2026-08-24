@@ -12,50 +12,26 @@ struct AnimeSearchPage: View {
 
     var body: some View {
         ScrollView {
-            Group {
-                switch viewModel.state {
-                case .idle:
-                    if viewModel.query.trimmingCharacters(
-                        in: .whitespacesAndNewlines
-                    ).isEmpty {
-                        searchLanding
-                    } else {
-                        LoadStateView(state: .loading)
+            LazyVStack(spacing: 0) {
+                Picker("搜索类型", selection: scopeBinding) {
+                    ForEach(AnimeSearchScope.allCases) { scope in
+                        Text(scope.title).tag(scope)
                     }
-                case .loading:
-                    LoadStateView(state: .loading)
-                case .failed:
-                    LoadStateView(state: viewModel.state) {
-                        Task { await viewModel.search() }
-                    }
-                case .loaded where viewModel.results.isEmpty:
-                    EmptyStateView(
-                        systemImage: "text.magnifyingglass",
-                        title: "没有搜索结果",
-                        message: "试试更短的关键词或其他片名。"
-                    )
-                case .loaded:
-                    AnimeGridView(items: viewModel.results, client: client) { anime in
-                        Task { await viewModel.loadMoreIfNeeded(current: anime) }
-                    }
-                    .padding()
                 }
-            }
+                .pickerStyle(.segmented)
+                .padding(.horizontal)
+                .padding(.vertical, 12)
 
-            if viewModel.isLoadingMore {
-                ProgressView()
-                    .padding()
-            } else if viewModel.loadMoreErrorMessage != nil {
-                Button("重试加载更多") {
-                    Task { await viewModel.retryLoadMore() }
-                }
-                .buttonStyle(.bordered)
-                .padding()
+                searchContent
+                paginationContent
             }
         }
         .background(Color(.systemGroupedBackground).ignoresSafeArea())
         .navigationTitle("搜索")
-        .searchable(text: $viewModel.query, prompt: "番剧名、角色或标签")
+        .searchable(
+            text: $viewModel.query,
+            prompt: Text(viewModel.scope.prompt)
+        )
         .onChange(of: viewModel.query) { _ in
             viewModel.queryDidChange()
         }
@@ -66,6 +42,58 @@ struct AnimeSearchPage: View {
             viewModel.refreshPlatformContextIfNeeded()
             await viewModel.loadHotWords()
         }
+    }
+
+    @ViewBuilder
+    private var searchContent: some View {
+        switch viewModel.state {
+        case .idle:
+            if viewModel.query.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            ).isEmpty {
+                searchLanding
+            } else {
+                LoadStateView(state: .loading)
+            }
+        case .loading:
+            LoadStateView(state: .loading)
+        case .failed:
+            LoadStateView(state: viewModel.state) {
+                Task { await viewModel.search() }
+            }
+        case .loaded where viewModel.results.isEmpty:
+            EmptyStateView(
+                systemImage: "text.magnifyingglass",
+                title: "没有搜索结果",
+                message: "试试更短的关键词或其他标题。"
+            )
+        case .loaded:
+            AnimeGridView(items: viewModel.results, client: client) { anime in
+                Task { await viewModel.loadMoreIfNeeded(current: anime) }
+            }
+            .padding()
+        }
+    }
+
+    @ViewBuilder
+    private var paginationContent: some View {
+        if viewModel.isLoadingMore {
+            ProgressView()
+                .padding()
+        } else if viewModel.loadMoreErrorMessage != nil {
+            Button("重试加载更多") {
+                Task { await viewModel.retryLoadMore() }
+            }
+            .buttonStyle(.bordered)
+            .padding()
+        }
+    }
+
+    private var scopeBinding: Binding<AnimeSearchScope> {
+        Binding(
+            get: { viewModel.scope },
+            set: { viewModel.selectScope($0) }
+        )
     }
 
     private var searchLanding: some View {

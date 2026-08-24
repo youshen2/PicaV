@@ -3,7 +3,7 @@ import SwiftUI
 import UIKit
 
 struct RemoteImageView: View {
-    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var settings: RemoteImageSettings
     @StateObject private var loader = RemoteImageLoader()
 
     private let urls: [URL]
@@ -59,16 +59,18 @@ struct RemoteImageView: View {
         .clipped()
         .task(id: taskID) {
             let requestKey = taskID
-            guard let networkRoute = try? settings.appNetworkRoute() else {
+            let contentKey = contentID
+            guard let networkRoute = try? settings.networkRoute() else {
                 loader.reset()
                 return
             }
             await loader.load(
                 requestKey: requestKey,
+                contentKey: contentKey,
                 urls: urls,
                 proxyBaseURL: settings.apiBaseURL,
                 useProxy: settings.useImageProxy,
-                configuration: settings.activePlatform.imageConfiguration,
+                configuration: settings.imageConfiguration,
                 maxPixelSize: maxPixelSize,
                 networkRoute: networkRoute
             )
@@ -76,22 +78,29 @@ struct RemoteImageView: View {
     }
 
     private var displayedImage: UIImage? {
-        loader.image(for: taskID)
+        loader.image(forContentKey: contentID)
             ?? AnimeImagePipeline.shared.cachedImage(
                 for: urls,
-                configuration: settings.activePlatform.imageConfiguration,
+                configuration: settings.imageConfiguration,
                 maxPixelSize: maxPixelSize
             )
     }
 
-    private var taskID: String {
+    private var contentID: String {
         [
             urls.map(\.absoluteString).joined(separator: ","),
             String(Int(maxPixelSize)),
+            settings.platformID.rawValue
+        ].joined(separator: "|")
+    }
+
+    private var taskID: String {
+        [
+            contentID,
             String(settings.useImageProxy),
             settings.apiBaseURL.absoluteString,
-            settings.platformID.rawValue,
-            String(settings.appProxyRevision)
+            String(settings.routeRevision),
+            String(settings.revision)
         ].joined(separator: "|")
     }
 }
@@ -103,6 +112,7 @@ private final class RemoteImageLoader: ObservableObject {
 
     func load(
         requestKey: String,
+        contentKey: String,
         urls: [URL],
         proxyBaseURL: URL,
         useProxy: Bool,
@@ -112,18 +122,20 @@ private final class RemoteImageLoader: ObservableObject {
     ) async {
         guard !urls.isEmpty else {
             image = nil
-            currentKey = nil
+            currentContentKey = nil
+            currentRequestKey = nil
             isLoading = false
             return
         }
 
-        if currentKey == requestKey, image != nil {
+        if currentContentKey != contentKey {
+            image = nil
+            currentContentKey = contentKey
+        }
+        currentRequestKey = requestKey
+        if image != nil {
             isLoading = false
             return
-        }
-        if currentKey != requestKey {
-            image = nil
-            currentKey = requestKey
         }
         if let cachedImage = AnimeImagePipeline.shared.cachedImage(
             for: urls,
@@ -136,7 +148,7 @@ private final class RemoteImageLoader: ObservableObject {
         }
         isLoading = true
         defer {
-            if currentKey == requestKey {
+            if currentRequestKey == requestKey {
                 isLoading = false
             }
         }
@@ -151,7 +163,8 @@ private final class RemoteImageLoader: ObservableObject {
                     networkRoute: networkRoute
                 )
                 guard !Task.isCancelled,
-                      currentKey == requestKey else {
+                      currentRequestKey == requestKey,
+                      currentContentKey == contentKey else {
                     return
                 }
                 withAnimation(.easeOut(duration: 0.18)) {
@@ -162,20 +175,23 @@ private final class RemoteImageLoader: ObservableObject {
                 guard !Task.isCancelled else { return }
             }
         }
-        if currentKey == requestKey {
+        if currentRequestKey == requestKey,
+           currentContentKey == contentKey {
             image = nil
         }
     }
 
-    func image(for requestKey: String) -> UIImage? {
-        currentKey == requestKey ? image : nil
+    func image(forContentKey contentKey: String) -> UIImage? {
+        currentContentKey == contentKey ? image : nil
     }
 
     func reset() {
         image = nil
-        currentKey = nil
+        currentContentKey = nil
+        currentRequestKey = nil
         isLoading = false
     }
 
-    private var currentKey: String?
+    private var currentContentKey: String?
+    private var currentRequestKey: String?
 }

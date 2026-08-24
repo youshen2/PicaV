@@ -74,6 +74,15 @@ final class AppSettings: ObservableObject {
         didSet { defaults.set(useImageProxy, forKey: Keys.useImageProxy) }
     }
 
+    @Published var automaticallySelectBuiltInProxy: Bool {
+        didSet {
+            defaults.set(
+                automaticallySelectBuiltInProxy,
+                forKey: Keys.automaticallySelectBuiltInProxy
+            )
+        }
+    }
+
     @Published private(set) var appProxyEnabled: Bool
     @Published private(set) var appProxyConfiguration: AppProxyConfiguration?
     @Published private(set) var appNetworkRoutingMode:
@@ -176,6 +185,16 @@ final class AppSettings: ObservableObject {
             useImageProxy = true
         } else {
             useImageProxy = defaults.bool(forKey: Keys.useImageProxy)
+        }
+
+        if defaults.object(
+            forKey: Keys.automaticallySelectBuiltInProxy
+        ) == nil {
+            automaticallySelectBuiltInProxy = true
+        } else {
+            automaticallySelectBuiltInProxy = defaults.bool(
+                forKey: Keys.automaticallySelectBuiltInProxy
+            )
         }
 
         appProxyConfiguration = Self.decodeProxyConfiguration(
@@ -498,6 +517,48 @@ final class AppSettings: ObservableObject {
         }
     }
 
+    func selectNextBuiltInProxyAfterForbidden(
+        failedProfileID: UUID,
+        excluding excludedProfileIDs: Set<UUID>
+    ) -> Bool {
+        guard automaticallySelectBuiltInProxy,
+              appNetworkRoutingMode == .builtInProxy,
+              appBuiltInProxyProfiles.count > 1 else {
+            return false
+        }
+
+        if let selectedBuiltInProxyID,
+           selectedBuiltInProxyID != failedProfileID,
+           !excludedProfileIDs.contains(selectedBuiltInProxyID),
+           let selectedProfile = selectedBuiltInProxyProfile,
+           (try? AppBuiltInProxyProfileStore.secret(
+               for: selectedProfile
+           )) != nil {
+            return true
+        }
+
+        let startID = selectedBuiltInProxyID ?? failedProfileID
+        let startIndex = appBuiltInProxyProfiles.firstIndex {
+            $0.id == startID
+        } ?? -1
+        for offset in 1...appBuiltInProxyProfiles.count {
+            let index = (startIndex + offset)
+                % appBuiltInProxyProfiles.count
+            let profile = appBuiltInProxyProfiles[index]
+            guard !excludedProfileIDs.contains(profile.id),
+                  (try? AppBuiltInProxyProfileStore.secret(
+                      for: profile
+                  )) != nil else {
+                continue
+            }
+            selectedBuiltInProxyID = profile.id
+            persistSelectedBuiltInProxyID()
+            appProxyDidChange(resetSessions: false)
+            return true
+        }
+        return false
+    }
+
     func removeBuiltInProxyProfiles(_ ids: Set<UUID>) throws {
         guard !ids.isEmpty else { return }
         let profiles = try AppBuiltInProxyProfileStore.remove(
@@ -638,9 +699,11 @@ final class AppSettings: ObservableObject {
         )
     }
 
-    private func appProxyDidChange() {
+    private func appProxyDidChange(resetSessions: Bool = true) {
         appProxyRevision &+= 1
-        AppNetworkSessionFactory.shared.reset()
+        if resetSessions {
+            AppNetworkSessionFactory.shared.reset()
+        }
     }
 
     private func activateRoutingMode(
@@ -778,6 +841,8 @@ final class AppSettings: ObservableObject {
             "network.builtInProxy.profiles"
         static let selectedBuiltInProxyID =
             "network.builtInProxy.selectedID"
+        static let automaticallySelectBuiltInProxy =
+            "network.builtInProxy.automaticallySelect"
         static let deviceID = "device.id"
 
         static let legacyBaseURL = "server.baseURL"

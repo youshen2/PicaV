@@ -201,3 +201,40 @@ final class AppMediaProxyBridge {
     private var activeRelays = [UUID: AppMediaProxyRelay]()
     private static let maximumRelayCount = 16
 }
+
+final class AppMediaProxyLease: @unchecked Sendable {
+    static func start(route: AppProxyRoute) async throws
+        -> AppMediaProxyLease {
+        let bridge = AppMediaProxyBridge()
+        let proxyURL = try await bridge.start(route: route)
+        return AppMediaProxyLease(
+            proxyURL: proxyURL,
+            bridge: bridge
+        )
+    }
+
+    let proxyURL: URL
+
+    func invalidate() {
+        lock.lock()
+        let bridge = self.bridge
+        self.bridge = nil
+        lock.unlock()
+        bridge?.stop()
+    }
+
+    deinit {
+        invalidate()
+    }
+
+    private init(
+        proxyURL: URL,
+        bridge: AppMediaProxyBridge
+    ) {
+        self.proxyURL = proxyURL
+        self.bridge = bridge
+    }
+
+    private let lock = NSLock()
+    private var bridge: AppMediaProxyBridge?
+}

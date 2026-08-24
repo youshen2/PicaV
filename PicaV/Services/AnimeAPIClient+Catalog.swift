@@ -158,11 +158,13 @@ extension AnimeAPIClient {
 
     func search(
         query searchWord: String,
+        scope: AnimeSearchScope,
         page: Int,
         pageSize: Int = 20
     ) async throws -> AnimePage {
         let specification = settings.activePlatform.searchRequest(
             query: searchWord,
+            scope: scope,
             page: page,
             pageSize: pageSize
         )
@@ -170,7 +172,8 @@ extension AnimeAPIClient {
         return try await animePage(
             from: payload,
             page: page,
-            pageSize: pageSize
+            pageSize: pageSize,
+            contentKindHint: scope.contentKind
         )
     }
 
@@ -185,4 +188,3 @@ extension AnimeAPIClient {
         }
     }
 }
-

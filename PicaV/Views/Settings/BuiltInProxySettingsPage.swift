@@ -15,6 +15,19 @@ struct BuiltInProxySettingsPage: View {
     var body: some View {
         Form {
             Section(
+                header: Text("节点选择"),
+                footer: Text(
+                    "开启后，当前节点的请求返回 403 时会按列表顺序切换并重试；"
+                        + "正在下载的任务会继续使用开始下载时的节点。"
+                )
+            ) {
+                Toggle(
+                    "自动选择节点",
+                    isOn: $settings.automaticallySelectBuiltInProxy
+                )
+            }
+
+            Section(
                 header: Text("Clash YAML 节点"),
                 footer: Text(
                     "点按节点会立即选择并切换到内置代理。密钥保存在钥匙串；"

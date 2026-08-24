@@ -215,6 +215,8 @@ final class VideoDownloadService: ObservableObject {
     }
 
     private func prepareAndStart(_ job: DownloadJob) async {
+        var proxyLease: AppMediaProxyLease?
+        var output: VideoDownloadOutput?
         do {
             try await VideoDownloadNetworkPolicy.validate(
                 allowsCellular: job.client.downloadOverCellular
@@ -225,14 +227,18 @@ final class VideoDownloadService: ObservableObject {
                 episodeID: job.item.episodeID
             )
             try Task.checkCancellation()
-            let proxyURL = try await proxyRuntime?
-                .mediaProxyURLForCurrentRoute()
-            let output = try await fileStore.prepareOutput(for: job.item)
+            proxyLease = try await proxyRuntime?
+                .makeDownloadProxyLeaseForCurrentRoute()
+            let preparedOutput = try await fileStore.prepareOutput(
+                for: job.item
+            )
+            output = preparedOutput
             try Task.checkCancellation()
             guard item(withID: job.item.id) != nil else {
+                proxyLease?.invalidate()
                 await fileStore.remove([
-                    output.temporaryURL,
-                    output.destinationURL
+                    preparedOutput.temporaryURL,
+                    preparedOutput.destinationURL
                 ])
                 finishJob(withID: job.item.id)
                 return
@@ -242,9 +248,9 @@ final class VideoDownloadService: ObservableObject {
             let worker = VideoMP4DownloadWorker(
                 configuration: .init(
                     sourceURL: sourceURL,
-                    temporaryURL: output.temporaryURL,
-                    destinationURL: output.destinationURL,
-                    proxyURL: proxyURL
+                    temporaryURL: preparedOutput.temporaryURL,
+                    destinationURL: preparedOutput.destinationURL,
+                    proxyURL: proxyLease?.proxyURL
                 ),
                 progress: { [weak self] progress in
                     self?.progressThrottler.submit(progress, for: id)
@@ -253,12 +259,15 @@ final class VideoDownloadService: ObservableObject {
                     Task { @MainActor [weak self] in
                         await self?.handleCompletion(
                             result,
-                            output: output,
+                            output: preparedOutput,
                             itemID: id
                         )
                     }
                 }
             )
+            if let proxyLease {
+                downloadProxyLeases[id] = proxyLease
+            }
             workers[id] = worker
             updateItem(id) {
                 $0.status = .downloading
@@ -266,8 +275,22 @@ final class VideoDownloadService: ObservableObject {
             }
             worker.start()
         } catch is CancellationError {
+            proxyLease?.invalidate()
+            if let output {
+                await fileStore.remove([
+                    output.temporaryURL,
+                    output.destinationURL
+                ])
+            }
             finishJob(withID: job.item.id)
         } catch {
+            proxyLease?.invalidate()
+            if let output {
+                await fileStore.remove([
+                    output.temporaryURL,
+                    output.destinationURL
+                ])
+            }
             updateItem(job.item.id) {
                 $0.status = .failed
                 $0.errorMessage = error.localizedDescription
@@ -334,6 +357,7 @@ final class VideoDownloadService: ObservableObject {
     }
 
     private func finishJob(withID id: String) {
+        downloadProxyLeases.removeValue(forKey: id)?.invalidate()
         workers[id] = nil
         jobTasks[id] = nil
         activeJobIDs.remove(id)
@@ -487,6 +511,7 @@ final class VideoDownloadService: ObservableObject {
     private var activeJobIDs = Set<String>()
     private var jobTasks = [String: Task<Void, Never>]()
     private var workers = [String: VideoMP4DownloadWorker]()
+    private var downloadProxyLeases = [String: AppMediaProxyLease]()
     private var lastProgressPersistenceDates: [String: Date] = [:]
     private var persistenceRevision = 0
     private var lastPersistenceTask: Task<Void, Never>?

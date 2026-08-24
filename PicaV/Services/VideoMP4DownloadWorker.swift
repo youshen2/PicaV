@@ -251,8 +251,7 @@ final class VideoMP4DownloadWorker: @unchecked Sendable {
             let readResult = av_read_frame(inputContext, &packet)
             if readResult < 0 {
                 av_packet_unref(&packet)
-                if readResult == Self.endOfFileError
-                    || avio_feof(inputContext.pointee.pb) > 0 {
+                if readResult == Self.endOfFileError {
                     return
                 }
                 try checkCancellation()

@@ -290,7 +290,8 @@ final class AnimeAPIClient: ObservableObject {
     private func send(
         _ specification: PlatformRequest,
         travelerKey: String? = nil,
-        allowsTokenRefresh: Bool = true
+        allowsTokenRefresh: Bool = true,
+        attemptedBuiltInProxyIDs: Set<UUID> = []
     ) async throws -> ServerPayload {
         if specification.requiresAuthentication {
             try await ensureAuthenticated()
@@ -331,9 +332,10 @@ final class AnimeAPIClient: ObservableObject {
         }
 
         let decryptionToken = settings.effectiveAccessToken
-        let session = try injectedSession
+        let networkRoute = try settings.appNetworkRoute()
+        let session = injectedSession
             ?? AppNetworkSessionFactory.shared.session(
-                for: settings.appNetworkRoute(),
+                for: networkRoute,
                 purpose: .api
             )
         let (data, response) = try await session.data(for: request)
@@ -355,16 +357,92 @@ final class AnimeAPIClient: ObservableObject {
             return try await send(
                 specification,
                 travelerKey: travelerKey,
-                allowsTokenRefresh: false
+                allowsTokenRefresh: false,
+                attemptedBuiltInProxyIDs:
+                    attemptedBuiltInProxyIDs
             )
         }
-        return try await AnimeResponseParser.parse(
-            data: data,
-            statusCode: httpResponse.statusCode,
+        if httpResponse.statusCode == 403,
+           let payload = try await retryAfterForbidden(
+               specification,
+               networkRoute: networkRoute,
+               travelerKey: travelerKey,
+               allowsTokenRefresh: allowsTokenRefresh,
+               attemptedBuiltInProxyIDs:
+                   attemptedBuiltInProxyIDs
+           ) {
+            return payload
+        }
+        do {
+            return try await AnimeResponseParser.parse(
+                data: data,
+                statusCode: httpResponse.statusCode,
+                travelerKey: travelerKey,
+                timestamp: timestamp,
+                accessToken: decryptionToken
+            )
+        } catch let error as AnimeAPIError {
+            guard case .server(let code, _) = error,
+                  code == 403 else {
+                throw error
+            }
+            if let payload = try await retryAfterForbidden(
+                specification,
+                networkRoute: networkRoute,
+                travelerKey: travelerKey,
+                allowsTokenRefresh: allowsTokenRefresh,
+                attemptedBuiltInProxyIDs:
+                    attemptedBuiltInProxyIDs
+            ) {
+                return payload
+            }
+            throw error
+        }
+    }
+
+    private func retryAfterForbidden(
+        _ specification: PlatformRequest,
+        networkRoute: AppNetworkRoute,
+        travelerKey: String?,
+        allowsTokenRefresh: Bool,
+        attemptedBuiltInProxyIDs: Set<UUID>
+    ) async throws -> ServerPayload? {
+        guard let failedProfileID = builtInProxyProfileID(
+            in: networkRoute
+        ) else {
+            return nil
+        }
+        var attemptedIDs = attemptedBuiltInProxyIDs
+        attemptedIDs.insert(failedProfileID)
+        guard settings.selectNextBuiltInProxyAfterForbidden(
+            failedProfileID: failedProfileID,
+            excluding: attemptedIDs
+        ) else {
+            return nil
+        }
+        if injectedSession == nil {
+            AppNetworkSessionFactory.shared.retireSessions(
+                for: networkRoute
+            )
+        }
+        try Task.checkCancellation()
+        return try await send(
+            specification,
             travelerKey: travelerKey,
-            timestamp: timestamp,
-            accessToken: decryptionToken
+            allowsTokenRefresh: allowsTokenRefresh,
+            attemptedBuiltInProxyIDs: attemptedIDs
         )
+    }
+
+    private func builtInProxyProfileID(
+        in route: AppNetworkRoute
+    ) -> UUID? {
+        guard case .proxy(
+            .builtIn(let profile, _, _)
+        ) = route else {
+            return nil
+        }
+        return profile.id
     }
 
     private func ensureAuthenticated() async throws {

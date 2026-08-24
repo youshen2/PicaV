@@ -37,12 +37,25 @@ struct VideoDownloadListPage: View {
                     }
 
                     if !completedItems.isEmpty {
-                        Section("已下载") {
+                        Section {
                             ForEach(completedItems) { item in
                                 downloadButton(item)
                                     .swipeActions(edge: .trailing) {
                                         deleteButton(item)
                                     }
+                            }
+                        } header: {
+                            HStack {
+                                Text("已下载")
+                                Spacer()
+                                Button(role: .destructive) {
+                                    confirmsClearCompleted = true
+                                } label: {
+                                    Label("清空", systemImage: "trash")
+                                }
+                                .buttonStyle(.borderless)
+                                .font(.caption)
+                                .textCase(nil)
                             }
                         }
                     }
@@ -70,24 +83,16 @@ struct VideoDownloadListPage: View {
         .navigationTitle("下载视频")
         .navigationBarTitleDisplayMode(.inline)
         .picaVHidesTabBar()
-        .toolbar {
-            ToolbarItem(placement: .navigationBarTrailing) {
-                Button {
-                    confirmsClearCompleted = true
-                } label: {
-                    Image(systemName: "trash")
-                }
-                .disabled(completedItems.isEmpty)
-                .accessibilityLabel("清空已缓存")
-            }
-        }
-        .alert("清空全部已缓存视频？", isPresented: $confirmsClearCompleted) {
+        .alert("清空全部已下载视频？", isPresented: $confirmsClearCompleted) {
             Button("取消", role: .cancel) {}
             Button("清空", role: .destructive) {
                 downloads.clearCompleted()
             }
         } message: {
-            Text("本地视频文件会被删除，平台收藏和浏览记录不会受到影响。")
+            Text(
+                "将删除 \(completedItems.count) 个本地视频文件，"
+                    + "平台收藏和浏览记录不会受到影响。"
+            )
         }
         .alert("无法播放", isPresented: playbackErrorPresented) {
             Button("好", role: .cancel) {}

@@ -69,6 +69,16 @@ final class AppNetworkSessionFactory {
         existingSessions.forEach { $0.invalidateAndCancel() }
     }
 
+    func retireSessions(for route: AppNetworkRoute) {
+        lock.lock()
+        let keys = sessions.keys.filter { $0.route == route }
+        let retiredSessions = keys.compactMap {
+            sessions.removeValue(forKey: $0)
+        }
+        lock.unlock()
+        retiredSessions.forEach { $0.finishTasksAndInvalidate() }
+    }
+
     private func makeConfiguration(
         for route: AppNetworkRoute,
         purpose: AppNetworkPurpose

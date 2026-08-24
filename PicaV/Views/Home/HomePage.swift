@@ -1,7 +1,6 @@
 import SwiftUI
 
 struct HomePage: View {
-    @EnvironmentObject private var library: LibraryStore
     @StateObject private var viewModel: HomeViewModel
 
     private let client: AnimeAPIClient
@@ -74,12 +73,8 @@ struct HomePage: View {
                     HeroAnimeView(anime: hero, client: client)
                 }
 
-                if viewModel.isFeaturedChannelSelected,
-                   !visibleHistory.isEmpty {
-                    ContinueWatchingSection(
-                        entries: Array(visibleHistory.prefix(8)),
-                        client: client
-                    )
+                if viewModel.isFeaturedChannelSelected {
+                    ContinueWatchingSection(client: client)
                 }
 
                 if !viewModel.sections.isEmpty {
@@ -126,10 +121,6 @@ struct HomePage: View {
                 }
             }
         )
-    }
-
-    private var visibleHistory: [WatchHistoryEntry] {
-        library.history.filter { $0.anime.contentKind != .comic }
     }
 }
 
@@ -357,55 +348,77 @@ private struct HorizontalLandscapeAnimeRail: View {
 }
 
 private struct ContinueWatchingSection: View {
-    let entries: [WatchHistoryEntry]
+    @EnvironmentObject private var library: LibraryStore
     let client: AnimeAPIClient
 
+    @ViewBuilder
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HomeSectionHeader(title: "继续观看", subtitle: "接着上次的进度")
+        if !entries.isEmpty {
+            VStack(alignment: .leading, spacing: 12) {
+                HomeSectionHeader(
+                    title: "继续观看",
+                    subtitle: "接着上次的进度"
+                )
                 .padding(.bottom, 0)
 
-            ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(spacing: 14) {
-                    ForEach(entries) { entry in
-                        NavigationLink {
-                            AnimeDetailPage(
-                                videoID: entry.anime.id,
-                                preview: entry.anime,
-                                client: client,
-                                startsPlayback: true,
-                                initialEpisodeID: entry.episodeID,
-                                initialEpisodeTitle: entry.episodeTitle
-                            )
-                        } label: {
-                            VStack(alignment: .leading, spacing: 8) {
-                                RemoteImageView(
-                                    url: entry.anime.bannerURL ?? entry.anime.coverURL,
-                                    maxPixelSize: 640
+                ScrollView(.horizontal, showsIndicators: false) {
+                    LazyHStack(spacing: 14) {
+                        ForEach(entries) { entry in
+                            NavigationLink {
+                                AnimeDetailPage(
+                                    videoID: entry.anime.id,
+                                    preview: entry.anime,
+                                    client: client,
+                                    startsPlayback: true,
+                                    initialEpisodeID: entry.episodeID,
+                                    initialEpisodeTitle: entry.episodeTitle
                                 )
-                                .frame(width: 210, height: 118)
-                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                                .overlay(alignment: .bottom) {
-                                    ProgressView(value: entry.progressFraction)
+                            } label: {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    RemoteImageView(
+                                        url: entry.anime.bannerURL
+                                            ?? entry.anime.coverURL,
+                                        maxPixelSize: 640
+                                    )
+                                    .frame(width: 210, height: 118)
+                                    .clipShape(
+                                        RoundedRectangle(
+                                            cornerRadius: 12,
+                                            style: .continuous
+                                        )
+                                    )
+                                    .overlay(alignment: .bottom) {
+                                        ProgressView(
+                                            value: entry.progressFraction
+                                        )
                                         .tint(.accentColor)
                                         .padding(.horizontal, 6)
                                         .padding(.bottom, 5)
+                                    }
+                                    Text(entry.anime.title)
+                                        .font(.subheadline.weight(.semibold))
+                                        .foregroundColor(.primary)
+                                        .lineLimit(1)
+                                    Text(entry.episodeTitle)
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
                                 }
-                                Text(entry.anime.title)
-                                    .font(.subheadline.weight(.semibold))
-                                    .foregroundColor(.primary)
-                                    .lineLimit(1)
-                                Text(entry.episodeTitle)
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
+                                .frame(width: 210, alignment: .leading)
                             }
-                            .frame(width: 210, alignment: .leading)
+                            .buttonStyle(.plain)
                         }
-                        .buttonStyle(.plain)
                     }
+                    .padding(.horizontal)
                 }
-                .padding(.horizontal)
             }
         }
+    }
+
+    private var entries: [WatchHistoryEntry] {
+        Array(
+            library.history.lazy
+                .filter { $0.anime.contentKind != .comic }
+                .prefix(8)
+        )
     }
 }

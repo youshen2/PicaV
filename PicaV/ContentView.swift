@@ -1,16 +1,16 @@
 import SwiftUI
 
 struct ContentView: View {
-    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var contentContext: AppContentContext
     @EnvironmentObject private var library: LibraryStore
 
     var body: some View {
         MainTabView()
-            .id(settings.contentContextIdentity)
+            .id(contentContext.identity)
             .onAppear {
-                library.selectPlatform(settings.platformID)
+                library.selectPlatform(contentContext.platformID)
             }
-            .onChange(of: settings.platformID) { platformID in
+            .onChange(of: contentContext.platformID) { platformID in
                 library.selectPlatform(platformID)
             }
     }

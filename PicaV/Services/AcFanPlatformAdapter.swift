@@ -195,16 +195,29 @@ struct AcFanPlatformAdapter: AnimePlatformAdapter {
         return PlatformRequest(path: "video/getByClassify", query: query)
     }
 
-    func searchRequest(query: String, page: Int, pageSize: Int) -> PlatformRequest {
-        PlatformRequest(
+    func searchRequest(
+        query: String,
+        scope: AnimeSearchScope,
+        page: Int,
+        pageSize: Int
+    ) -> PlatformRequest {
+        var parameters = [
+            "page": String(page),
+            "pageSize": String(pageSize),
+            "searchWord": query
+        ]
+        switch scope {
+        case .anime:
+            parameters["searchType"] = "1"
+        case .video:
+            parameters["searchType"] = "5"
+        case .shortVideo:
+            parameters["searchType"] = "5"
+            parameters["videoMark"] = "2"
+        }
+        return PlatformRequest(
             path: "search/keyWordV2",
-            query: [
-                "page": String(page),
-                "pageSize": String(pageSize),
-                "searchType": "1",
-                "searchWord": query,
-                "videoMark": "2"
-            ]
+            query: parameters
         )
     }
 

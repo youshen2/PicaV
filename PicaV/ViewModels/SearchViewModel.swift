@@ -4,6 +4,7 @@ import Foundation
 @MainActor
 final class SearchViewModel: ObservableObject {
     @Published var query = ""
+    @Published private(set) var scope: AnimeSearchScope
     @Published private(set) var state: LoadState = .idle
     @Published private(set) var results: [Anime] = []
     @Published private(set) var hasMore = false
@@ -20,16 +21,22 @@ final class SearchViewModel: ObservableObject {
         self.client = client
         self.defaults = defaults
         currentPlatformID = client.platformID
+        scope = Self.savedScope(
+            for: client.platformID,
+            defaults: defaults
+        )
         searchHistory = defaults.stringArray(
             forKey: Self.historyKey(for: client.platformID)
         ) ?? []
     }
 
     func queryDidChange() {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed != handledQuery else { return }
+        handledQuery = trimmed
         debounceTask?.cancel()
         activeSearchRequestID = nil
         invalidateLoadMore()
-        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             state = .idle
             results = []
@@ -52,9 +59,38 @@ final class SearchViewModel: ObservableObject {
     }
 
     func useSuggestion(_ word: String) async {
-        query = word
+        let trimmed = word.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        handledQuery = trimmed
+        query = trimmed
         debounceTask?.cancel()
         await performSearch(recordsHistory: true)
+    }
+
+    func selectScope(_ newScope: AnimeSearchScope) {
+        guard scope != newScope else { return }
+        scope = newScope
+        defaults.set(
+            newScope.rawValue,
+            forKey: Self.scopeKey(for: currentPlatformID)
+        )
+        debounceTask?.cancel()
+        activeSearchRequestID = nil
+        invalidateLoadMore()
+        results = []
+        hasMore = false
+        currentPage = 1
+
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            state = .idle
+            return
+        }
+        state = .loading
+        debounceTask = Task { [weak self] in
+            guard !Task.isCancelled else { return }
+            await self?.performSearch(recordsHistory: false)
+        }
     }
 
     func loadHotWords(force: Bool = false) async {
@@ -85,6 +121,10 @@ final class SearchViewModel: ObservableObject {
     func refreshPlatformContextIfNeeded() {
         guard currentPlatformID != client.platformID else { return }
         currentPlatformID = client.platformID
+        scope = Self.savedScope(
+            for: currentPlatformID,
+            defaults: defaults
+        )
         searchHistory = defaults.stringArray(
             forKey: Self.historyKey(for: currentPlatformID)
         ) ?? []
@@ -93,6 +133,7 @@ final class SearchViewModel: ObservableObject {
         debounceTask?.cancel()
         activeSearchRequestID = nil
         invalidateLoadMore()
+        handledQuery = ""
         query = ""
         results = []
         state = .idle
@@ -104,6 +145,7 @@ final class SearchViewModel: ObservableObject {
         refreshPlatformContextIfNeeded()
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        let requestedScope = scope
         let requestID = UUID()
         activeSearchRequestID = requestID
         invalidateLoadMore()
@@ -112,9 +154,14 @@ final class SearchViewModel: ObservableObject {
         }
         state = .loading
         do {
-            let page = try await client.search(query: trimmed, page: 1)
+            let page = try await client.search(
+                query: trimmed,
+                scope: requestedScope,
+                page: 1
+            )
             guard query.trimmingCharacters(in: .whitespacesAndNewlines)
                 == trimmed,
+                scope == requestedScope,
                 activeSearchRequestID == requestID,
                 !Task.isCancelled else {
                 return
@@ -141,6 +188,7 @@ final class SearchViewModel: ObservableObject {
         }
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        let requestedScope = scope
 
         let requestID = UUID()
         activeLoadMoreRequestID = requestID
@@ -155,10 +203,12 @@ final class SearchViewModel: ObservableObject {
         do {
             let next = try await client.search(
                 query: trimmed,
+                scope: requestedScope,
                 page: nextPage
             )
             guard !Task.isCancelled,
                   activeLoadMoreRequestID == requestID,
+                  scope == requestedScope,
                   query.trimmingCharacters(in: .whitespacesAndNewlines)
                     == trimmed else {
                 return
@@ -216,10 +266,24 @@ final class SearchViewModel: ObservableObject {
         "search.history.\(platformID.rawValue)"
     }
 
+    private static func scopeKey(for platformID: AnimePlatformID) -> String {
+        "search.scope.\(platformID.rawValue)"
+    }
+
+    private static func savedScope(
+        for platformID: AnimePlatformID,
+        defaults: UserDefaults
+    ) -> AnimeSearchScope {
+        defaults.string(forKey: scopeKey(for: platformID))
+            .flatMap(AnimeSearchScope.init(rawValue:))
+            ?? .anime
+    }
+
     private let client: AnimeAPIClient
     private let defaults: UserDefaults
     private var currentPlatformID: AnimePlatformID
     private var currentPage = 1
+    private var handledQuery = ""
     private var debounceTask: Task<Void, Never>?
     private var activeSearchRequestID: UUID?
     private var activeLoadMoreRequestID: UUID?

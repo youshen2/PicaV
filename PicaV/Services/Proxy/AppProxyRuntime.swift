@@ -57,6 +57,16 @@ final class AppProxyRuntime: ObservableObject {
         throw AppProxyError.mediaBridgeUnavailable("代理桥接尚未就绪")
     }
 
+    func makeDownloadProxyLeaseForCurrentRoute() async throws
+        -> AppMediaProxyLease? {
+        switch try settings.appNetworkRoute() {
+        case .direct:
+            return nil
+        case .proxy(let route):
+            return try await AppMediaProxyLease.start(route: route)
+        }
+    }
+
     init(settings: AppSettings) {
         self.settings = settings
         settingsSubscription = settings.$appProxyRevision.sink {

@@ -191,7 +191,12 @@ protocol AnimePlatformAdapter {
         pageSize: Int,
         sort: AnimeSort
     ) -> PlatformRequest
-    func searchRequest(query: String, page: Int, pageSize: Int) -> PlatformRequest
+    func searchRequest(
+        query: String,
+        scope: AnimeSearchScope,
+        page: Int,
+        pageSize: Int
+    ) -> PlatformRequest
     func searchHotWordsRequest() -> PlatformRequest?
     func detailRequest(
         itemID: String,
