@@ -93,7 +93,7 @@ final class AppSettings: ObservableObject {
     }
 
     var contentContextIdentity: String {
-        "\(platformID.rawValue)|\(contentContextRevision)|\(appProxyRevision)"
+        "\(platformID.rawValue)|\(contentContextRevision)"
     }
 
     var effectiveAccessToken: String {
@@ -498,19 +498,29 @@ final class AppSettings: ObservableObject {
         }
     }
 
-    func removeBuiltInProxyProfile(_ id: UUID) throws {
-        appBuiltInProxyProfiles =
-            try AppBuiltInProxyProfileStore.remove(
-                profileID: id,
-                from: appBuiltInProxyProfiles,
-                defaults: defaults,
-                storageKey: Keys.appBuiltInProxyProfiles
-            )
-        if selectedBuiltInProxyID == id {
-            selectedBuiltInProxyID = appBuiltInProxyProfiles.first?.id
+    func removeBuiltInProxyProfiles(_ ids: Set<UUID>) throws {
+        guard !ids.isEmpty else { return }
+        let profiles = try AppBuiltInProxyProfileStore.remove(
+            profileIDs: ids,
+            from: appBuiltInProxyProfiles,
+            defaults: defaults,
+            storageKey: Keys.appBuiltInProxyProfiles
+        )
+        guard profiles.count != appBuiltInProxyProfiles.count else {
+            return
+        }
+        appBuiltInProxyProfiles = profiles
+        if selectedBuiltInProxyProfile == nil {
+            selectedBuiltInProxyID = profiles.first?.id
             persistSelectedBuiltInProxyID()
         }
         appProxyDidChange()
+    }
+
+    func clearBuiltInProxyProfiles() throws {
+        try removeBuiltInProxyProfiles(
+            Set(appBuiltInProxyProfiles.map(\.id))
+        )
     }
 
     var selectedBuiltInProxyProfile: AppBuiltInProxyProfile? {

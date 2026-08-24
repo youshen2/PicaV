@@ -81,24 +81,26 @@ enum AppBuiltInProxyProfileStore {
     }
 
     static func remove(
-        profileID: UUID,
+        profileIDs: Set<UUID>,
         from existingProfiles: [AppBuiltInProxyProfile],
         defaults: UserDefaults,
         storageKey: String
     ) throws -> [AppBuiltInProxyProfile] {
-        guard let profile = existingProfiles.first(where: {
-            $0.id == profileID
-        }) else {
+        let removedProfiles = existingProfiles.filter {
+            profileIDs.contains($0.id)
+        }
+        guard !removedProfiles.isEmpty else {
             return existingProfiles
         }
-        let profiles = existingProfiles.filter { $0.id != profileID }
+        let profiles = existingProfiles.filter {
+            !profileIDs.contains($0.id)
+        }
         defaults.set(
             try JSONEncoder().encode(profiles),
             forKey: storageKey
         )
-        if let secretRef = profile.secretRef {
-            KeychainStore.remove(secretRef)
-        }
+        Set(removedProfiles.compactMap(\.secretRef))
+            .forEach(KeychainStore.remove)
         return profiles
     }
 

@@ -7,6 +7,7 @@ struct BuiltInProxySettingsPage: View {
     @State private var showingPasteImporter = false
     @State private var showingSubscriptionImporter = false
     @State private var showingFileImporter = false
+    @State private var confirmingClear = false
     @State private var isImportingFile = false
     @State private var testingProfileID: UUID?
     @State private var feedback: Feedback?
@@ -55,6 +56,20 @@ struct BuiltInProxySettingsPage: View {
                     showingSubscriptionImporter = true
                 } label: {
                     Label("从订阅链接导入", systemImage: "link.badge.plus")
+                }
+            }
+
+            if !settings.appBuiltInProxyProfiles.isEmpty {
+                Section(
+                    footer: Text(
+                        "清空后不会自动回退直连；请重新导入节点或在请求方式中选择其他路由。"
+                    )
+                ) {
+                    Button(role: .destructive) {
+                        confirmingClear = true
+                    } label: {
+                        Label("清空所有节点", systemImage: "trash")
+                    }
                 }
             }
 
@@ -141,6 +156,12 @@ struct BuiltInProxySettingsPage: View {
             allowsMultipleSelection: false,
             onCompletion: handleFileSelection
         )
+        .alert("清空所有内置代理节点？", isPresented: $confirmingClear) {
+            Button("取消", role: .cancel) {}
+            Button("清空", role: .destructive, action: clearProfiles)
+        } message: {
+            Text("所有节点及其钥匙串密钥都将被删除，此操作无法撤销。")
+        }
     }
 
     private func nodeButton(
@@ -193,11 +214,25 @@ struct BuiltInProxySettingsPage: View {
                 : nil
         }
         do {
-            for id in ids {
-                try settings.removeBuiltInProxyProfile(id)
-            }
+            try settings.removeBuiltInProxyProfiles(Set(ids))
             feedback = Feedback(
                 message: "已删除 \(ids.count) 个节点及其钥匙串密钥。",
+                isError: false
+            )
+        } catch {
+            feedback = Feedback(
+                message: error.localizedDescription,
+                isError: true
+            )
+        }
+    }
+
+    private func clearProfiles() {
+        let count = settings.appBuiltInProxyProfiles.count
+        do {
+            try settings.clearBuiltInProxyProfiles()
+            feedback = Feedback(
+                message: "已清空 \(count) 个节点及其钥匙串密钥。",
                 isError: false
             )
         } catch {
